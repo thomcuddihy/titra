@@ -11,10 +11,15 @@ import './components/transactionscomponent.js'
 import './components/inboundinterfacescomponent.js'
 import './components/outboundinterfacescomponent.js'
 import './components/webhookverificationcomponent.js'
+import {
+  migrationAdminSummary,
+  refreshTimecardMigrationSummary,
+} from './components/timecardmigrationcomponent.js'
 
 Template.administration.onCreated(function administrationCreated() {
   this.activeTab = new ReactiveVar()
   this.subscribe('userRoles')
+  refreshTimecardMigrationSummary()
   this.autorun(() => {
     $(`#${this.activeTab.get()}`).tab('show')
   })
@@ -38,6 +43,8 @@ Template.administration.helpers({
   isActive(tab) {
     return Template.instance().activeTab.get() === tab
   },
+  migrationAttention: () => migrationAdminSummary.get()?.attentionRequired,
+  migrationCandidateCount: () => migrationAdminSummary.get()?.attentionCount || 0,
 })
 Template.administration.events({
   'click .accordion-button': (event) => {

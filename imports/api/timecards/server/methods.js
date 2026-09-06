@@ -1738,5 +1738,3 @@ export {
   getTotalForWeekPerDay,
   bulkInsertTimecards,
 }
-
-

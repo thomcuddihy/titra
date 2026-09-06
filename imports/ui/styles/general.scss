@@ -40,6 +40,60 @@ $btn-link-color: $body-color;
 :root {
   accent-color: var(--bs-primary);
 }
+
+// Keep migration controls and machine-readable reports legible in both custom themes.
+.timecard-migration {
+  .btn-outline-secondary:not(:disabled) {
+    color: var(--bs-body-color) !important;
+    border-color: var(--bs-border-color) !important;
+  }
+
+  .btn-outline-primary:not(:disabled) {
+    color: #fff !important;
+    background-color: #00675e !important;
+    border-color: #00675e !important;
+  }
+
+  .btn-outline-primary:not(:disabled):hover {
+    background-color: #004f49 !important;
+    border-color: #004f49 !important;
+  }
+
+  .btn-outline-primary:disabled,
+  .btn-outline-secondary:disabled {
+    color: var(--bs-secondary-color, rgba(108,117,125,0.75)) !important;
+    background-color: transparent !important;
+    border-color: var(--bs-secondary-color, rgba(108,117,125,0.75)) !important;
+    opacity: 1;
+  }
+
+  .btn-outline-danger:not(:disabled) {
+    color: #fff !important;
+    background-color: #a4133c !important;
+    border-color: #a4133c !important;
+  }
+
+  .btn-outline-danger:not(:disabled):hover {
+    background-color: #800f2f !important;
+    border-color: #800f2f !important;
+  }
+
+  .migration-sort-button {
+    color: var(--bs-table-color, var(--bs-body-color)) !important;
+    font-weight: 600;
+    line-height: 1.2;
+    text-align: start;
+    white-space: normal;
+  }
+
+  .migration-machine-report {
+    color: var(--bs-body-color) !important;
+    background-color: var(--bs-secondary) !important;
+    max-height: 28rem;
+    overflow: auto;
+    white-space: pre-wrap;
+  }
+}
 .form-label {
   z-index: 3;
 }
@@ -329,6 +383,21 @@ body.is-dark {
   }
   .text-muted {
     color: rgba(240,240,240,0.75) !important;
+  }
+  .timecard-migration {
+    .text-body-secondary {
+      color: rgba(240,240,240,0.75) !important;
+    }
+    code {
+      color: #ffb3d7;
+    }
+    .table-primary code,
+    .table-warning code {
+      color: #212529 !important;
+    }
+    .text-warning-emphasis {
+      color: #ffe69c !important;
+    }
   }
   .dropdown-menu .dropdown-item {
     text-decoration: none !important;

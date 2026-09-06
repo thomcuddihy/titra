@@ -1,0 +1,614 @@
+<template name="timecardmigrationcomponent">
+  <div class="card mb-3 border-warning timecard-migration">
+    <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+      <div>
+        <i class="fa fa-calendar-alt me-2"></i>
+        <strong>{{t "timecard_migration.title"}}</strong>
+      </div>
+      {{#if runId}}
+        <span class="badge {{runStatusClass}}">{{t "timecard_migration.run"}} {{runId}} · {{runStatus}}</span>
+      {{/if}}
+    </div>
+    <div class="card-body">
+      <p class="text-body-secondary">{{t "timecard_migration.introduction"}}</p>
+
+      {{#if error}}
+        <div class="alert alert-danger" role="alert">
+          <i class="fa fa-exclamation-circle me-2"></i>{{error}}
+        </div>
+      {{/if}}
+
+      <div class="d-flex flex-wrap gap-2 mb-4" aria-label="{{t 'timecard_migration.steps'}}">
+        <span class="badge rounded-pill {{stepClass 1}}">1. {{t "timecard_migration.step_scan"}}</span>
+        <span class="badge rounded-pill {{stepClass 2}}">2. {{t "timecard_migration.step_choose"}}</span>
+        <span class="badge rounded-pill {{stepClass 3}}">3. {{t "timecard_migration.step_preview"}}</span>
+        <span class="badge rounded-pill {{stepClass 4}}">4. {{t "timecard_migration.step_backup"}}</span>
+        <span class="badge rounded-pill {{stepClass 5}}">5. {{t "timecard_migration.step_apply"}}</span>
+        <span class="badge rounded-pill {{stepClass 6}}">6. {{t "timecard_migration.step_verify_restore"}}</span>
+      </div>
+
+      {{#if isStep 1}}
+        <section aria-labelledby="migration-scan-heading">
+          <h4 id="migration-scan-heading">{{t "timecard_migration.scan_title"}}</h4>
+          <p>{{t "timecard_migration.scan_help"}}</p>
+          {{#if loading}}
+            <div class="d-flex align-items-center gap-2 my-4">
+              <span class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+              <span>{{t "globals.loading"}}</span>
+            </div>
+          {{else}}
+            <div class="row g-3 mb-3">
+              <div class="col-6 col-lg-3">
+                <div class="card h-100"><div class="card-body text-center">
+                  <div class="fs-3">{{scanCount "canonical"}}</div>
+                  <div>{{t "timecard_migration.canonical"}}</div>
+                </div></div>
+              </div>
+              <div class="col-6 col-lg-3">
+                <div class="card h-100 border-warning"><div class="card-body text-center">
+                  <div class="fs-3">{{legacyCount}}</div>
+                  <div>{{t "timecard_migration.legacy"}}</div>
+                </div></div>
+              </div>
+              <div class="col-6 col-lg-3">
+                <div class="card h-100"><div class="card-body text-center">
+                  <div class="fs-3">{{scanCount "ambiguous"}}</div>
+                  <div>{{t "timecard_migration.ambiguous"}}</div>
+                </div></div>
+              </div>
+              <div class="col-6 col-lg-3">
+                <div class="card h-100"><div class="card-body text-center">
+                  <div class="fs-3">{{scanCount "invalid"}}</div>
+                  <div>{{t "timecard_migration.invalid"}}</div>
+                </div></div>
+              </div>
+            </div>
+            {{#if legacyDetected}}
+              <div class="alert alert-warning">
+                <i class="fa fa-exclamation-triangle me-2"></i>
+                {{t "timecard_migration.legacy_detected" legacyCount=candidateCount}}
+              </div>
+            {{else}}
+              {{#if quarantinedDetected}}
+                <div class="alert alert-warning">
+                  <i class="fa fa-exclamation-triangle me-2"></i>{{t "timecard_migration.quarantined_detected"}}
+                </div>
+              {{else}}
+                <div class="alert alert-success">
+                  <i class="fa fa-check-circle me-2"></i>{{t "timecard_migration.no_legacy_detected"}}
+                </div>
+              {{/if}}
+            {{/if}}
+            <div class="d-flex gap-2">
+              <button type="button" class="btn btn-outline-secondary js-rescan">
+                <i class="fa fa-sync-alt me-1"></i>{{t "timecard_migration.rescan"}}
+              </button>
+              {{#if legacyDetected}}
+                <button type="button" class="btn btn-primary js-go-to-options">
+                  {{t "timecard_migration.choose_method"}} <i class="fa fa-arrow-right ms-1"></i>
+                </button>
+              {{/if}}
+            </div>
+          {{/if}}
+        </section>
+      {{/if}}
+
+      {{#if isStep 2}}
+        <section aria-labelledby="migration-options-heading">
+          <h4 id="migration-options-heading">{{t "timecard_migration.choose_title"}}</h4>
+          <div class="alert alert-info">{{t "timecard_migration.choose_help"}}</div>
+
+          <div class="vstack gap-3 mb-4">
+            <label class="card p-3">
+              <span class="form-check">
+                <input class="form-check-input" type="radio" name="migrationMode" value="utc-wall-clock" {{modeCheckedAttributes "utc-wall-clock"}} {{disabledIf previewCreationLoading}}>
+                <span class="form-check-label fw-semibold">{{t "timecard_migration.mode_wall_clock"}}</span>
+              </span>
+              <small class="text-body-secondary ms-4">{{t "timecard_migration.mode_wall_clock_help"}}</small>
+            </label>
+            <label class="card p-3">
+              <span class="form-check">
+                <input class="form-check-input" type="radio" name="migrationMode" value="instant-in-zone" {{modeCheckedAttributes "instant-in-zone"}} {{disabledIf previewCreationLoading}}>
+                <span class="form-check-label fw-semibold">{{t "timecard_migration.mode_instant"}}</span>
+              </span>
+              <small class="text-body-secondary ms-4">{{t "timecard_migration.mode_instant_help"}}</small>
+            </label>
+            <label class="card p-3">
+              <span class="form-check">
+                <input class="form-check-input" type="radio" name="migrationMode" value="legacy-display-in-zone" {{modeCheckedAttributes "legacy-display-in-zone"}} {{disabledIf previewCreationLoading}}>
+                <span class="form-check-label fw-semibold">{{t "timecard_migration.mode_legacy_display"}}</span>
+              </span>
+              <small class="text-body-secondary ms-4">{{t "timecard_migration.mode_legacy_display_help"}}</small>
+            </label>
+            <label class="card p-3">
+              <span class="form-check">
+                <input class="form-check-input" type="radio" name="migrationMode" value="date-only" {{modeCheckedAttributes "date-only"}} {{disabledIf previewCreationLoading}}>
+                <span class="form-check-label fw-semibold">{{t "timecard_migration.mode_date_only"}}</span>
+              </span>
+              <small class="text-body-secondary ms-4">{{t "timecard_migration.mode_date_only_help"}}</small>
+            </label>
+          </div>
+
+          <div class="row g-3 mb-4">
+            <div class="col-lg-7">
+              <label class="form-label" for="migrationTimeZone">{{t "timecard_migration.company_time_zone"}}</label>
+              <input id="migrationTimeZone" class="form-control js-time-zone" type="text" list="migrationTimeZones" value="{{timeZone}}" placeholder="Australia/Brisbane" autocomplete="off" required {{disabledIf previewCreationLoading}}>
+              <datalist id="migrationTimeZones">
+                {{#each zone in commonTimeZones}}
+                  <option value="{{zone}}"></option>
+                {{/each}}
+              </datalist>
+              <div class="form-text">{{t "timecard_migration.company_time_zone_help"}}</div>
+            </div>
+            <div class="col-lg-5">
+              <label class="form-label" for="migrationStartTimePolicy">{{t "timecard_migration.start_time_policy"}}</label>
+              <select id="migrationStartTimePolicy" class="form-select js-start-time-policy" {{disabledIf startTimePolicyDisabled}}>
+                <option value="extract" {{startTimePolicySelectedAttributes 'extract'}}>{{t "timecard_migration.start_time_extract"}}</option>
+                <option value="omit" {{startTimePolicySelectedAttributes 'omit'}}>{{t "timecard_migration.start_time_omit"}}</option>
+              </select>
+              <div class="form-text">{{t "timecard_migration.start_time_policy_help"}}</div>
+            </div>
+          </div>
+
+          {{#if previewOptionsReady}}
+            <div class="card mb-4" aria-live="polite" aria-busy="{{optionPreviewLoading}}">
+              <div class="card-body">
+                <h5>{{t "timecard_migration.method_preview_title"}}</h5>
+                <p class="small text-body-secondary">{{t "timecard_migration.method_preview_help"}}</p>
+                {{#if optionPreviewError}}
+                  <div class="alert alert-danger">{{optionPreviewError}}</div>
+                {{/if}}
+                {{#if optionPreviewLoading}}
+                  <div class="text-center py-3"><span class="spinner-border spinner-border-sm" aria-label="{{t 'globals.loading'}}"></span></div>
+                {{else}}
+                  <div class="table-responsive">
+                    <table class="table table-sm align-middle mb-0">
+                      <caption class="visually-hidden">{{t "timecard_migration.method_preview_title"}}</caption>
+                      <thead>
+                        <tr>
+                          <th scope="col">{{t "timecard_migration.context"}}</th>
+                          <th scope="col">{{t "timecard_migration.raw_value"}}</th>
+                          <th scope="col">{{t "timecard_migration.current_display"}}</th>
+                          <th scope="col">{{t "timecard_migration.selected_result"}}</th>
+                          <th scope="col">{{t "timecard_migration.warnings"}}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {{#each item in optionPreviewItems}}
+                          <tr class="{{itemWarningClass item}}">
+                            <td><small>{{t "globals.user"}}: <code>{{item.userId}}</code><br>{{t "globals.project"}}: <code>{{item.projectId}}</code><br>{{t "globals.task"}}: {{item.task}}</small></td>
+                            <td><code>{{rawDate item}}</code></td>
+                            <td><code>{{currentDisplay item}}</code></td>
+                            <td><code>{{selectedProposal item}}</code></td>
+                            <td><small>{{itemWarnings item}}</small></td>
+                          </tr>
+                        {{else}}
+                          <tr><td colspan="5" class="text-center text-body-secondary py-3">{{t "timecard_migration.no_preview_rows"}}</td></tr>
+                        {{/each}}
+                      </tbody>
+                    </table>
+                  </div>
+                {{/if}}
+              </div>
+            </div>
+          {{/if}}
+
+          <div class="d-flex flex-wrap gap-2">
+            <button type="button" class="btn btn-outline-secondary js-back-to-scan" {{disabledIf previewCreationLoading}}><i class="fa fa-arrow-left me-1"></i>{{t "timecard_migration.back_to_scan"}}</button>
+            {{#if previewOptionsReady}}
+              <button type="button" class="btn btn-primary js-create-preview" {{disabledIf previewCreationLoading}}>
+                {{#if previewCreationLoading}}<span class="spinner-border spinner-border-sm me-1"></span>{{/if}}
+                {{t "timecard_migration.create_preview"}}
+              </button>
+            {{else}}
+              <button type="button" class="btn btn-primary" disabled>{{t "timecard_migration.create_preview"}}</button>
+            {{/if}}
+          </div>
+        </section>
+      {{/if}}
+
+      {{#if isStep 3}}
+        <section aria-labelledby="migration-preview-heading">
+          <div class="d-flex flex-wrap justify-content-between align-items-start gap-2 mb-3">
+            <div>
+              <h4 id="migration-preview-heading">{{t "timecard_migration.preview_title"}}</h4>
+              <p class="mb-0">{{t "timecard_migration.preview_help" timeZone=timeZone}}</p>
+            </div>
+            <span class="badge text-bg-primary">{{t "timecard_migration.selected"}}: {{selectedMode}}</span>
+          </div>
+
+          <div class="alert alert-secondary small">
+            <i class="fa fa-info-circle me-2"></i>{{t "timecard_migration.current_display_warning"}}
+          </div>
+
+          <div class="row g-2 mb-3">
+            <div class="col-md-5">
+              <select class="form-select js-classification-filter" aria-label="{{t 'timecard_migration.filter_classification'}}">
+                <option value="" {{classificationFilterSelectedAttributes ""}}>{{t "timecard_migration.all_classifications"}}</option>
+                <option value="legacy" {{classificationFilterSelectedAttributes "legacy"}}>{{t "timecard_migration.legacy"}}</option>
+                <option value="ambiguous" {{classificationFilterSelectedAttributes "ambiguous"}}>{{t "timecard_migration.ambiguous"}}</option>
+                <option value="quarantined" {{classificationFilterSelectedAttributes "quarantined"}}>{{t "timecard_migration.invalid"}}</option>
+              </select>
+            </div>
+            <div class="col-md-7 d-flex align-items-center">
+              <div class="form-check">
+                <input id="migrationWarningsOnly" class="form-check-input js-warning-filter" type="checkbox" {{checkedIf warningsOnly}}>
+                <label for="migrationWarningsOnly" class="form-check-label">{{t "timecard_migration.warnings_only"}}</label>
+              </div>
+            </div>
+          </div>
+
+          {{#if previewLoading}}
+            <div class="text-center py-2" role="status"><span class="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>{{t "globals.loading"}}</div>
+          {{/if}}
+            <div class="table-responsive" aria-busy="{{previewLoading}}">
+              <table class="table table-sm table-hover align-middle">
+                <thead>
+                  <tr>
+                    <th scope="col" aria-sort="{{previewAriaSort 'context'}}"><button type="button" class="btn btn-link btn-sm p-0 migration-sort-button js-preview-sort" data-sort-field="context" aria-disabled="{{previewLoading}}">{{t "timecard_migration.context"}} <span aria-hidden="true">{{previewSortIndicator 'context'}}</span></button></th>
+                    <th scope="col" aria-sort="{{previewAriaSort 'date'}}"><button type="button" class="btn btn-link btn-sm p-0 migration-sort-button js-preview-sort" data-sort-field="date" aria-disabled="{{previewLoading}}">{{t "timecard_migration.raw_value"}} <span aria-hidden="true">{{previewSortIndicator 'date'}}</span></button></th>
+                    <th scope="col">{{t "timecard_migration.current_display"}}</th>
+                    <th scope="col" class="{{selectedModeClass 'legacy-display-in-zone'}}">{{t "timecard_migration.legacy_display_result" timeZone=timeZone}}</th>
+                    <th scope="col" class="{{selectedModeClass 'utc-wall-clock'}}">{{t "timecard_migration.wall_clock_result"}}</th>
+                    <th scope="col" class="{{selectedModeClass 'instant-in-zone'}}">{{t "timecard_migration.zone_result" timeZone=timeZone}}</th>
+                    <th scope="col" class="{{selectedModeClass 'date-only'}}">{{t "timecard_migration.date_only_result"}}</th>
+                    <th scope="col" aria-sort="{{previewAriaSort 'classification'}}"><button type="button" class="btn btn-link btn-sm p-0 migration-sort-button js-preview-sort" data-sort-field="classification" aria-disabled="{{previewLoading}}">{{t "timecard_migration.classification"}} <span aria-hidden="true">{{previewSortIndicator 'classification'}}</span></button></th>
+                    <th scope="col" aria-sort="{{previewAriaSort 'day-shift'}}"><button type="button" class="btn btn-link btn-sm p-0 migration-sort-button js-preview-sort" data-sort-field="day-shift" aria-disabled="{{previewLoading}}">{{t "timecard_migration.day_shift"}} <span aria-hidden="true">{{previewSortIndicator 'day-shift'}}</span></button></th>
+                    <th scope="col">{{t "timecard_migration.warnings"}}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {{#each item in previewItems}}
+                    <tr class="{{itemWarningClass item}}">
+                      <td><small>{{t "globals.user"}}: <code>{{item.userId}}</code><br>{{t "globals.project"}}: <code>{{item.projectId}}</code><br>{{t "globals.task"}}: {{item.task}}</small></td>
+                      <td><code>{{rawDate item}}</code></td>
+                      <td><code>{{currentDisplay item}}</code></td>
+                      <td class="{{selectedModeClass 'legacy-display-in-zone'}}"><code>{{legacyDisplayInZone item}}</code></td>
+                      <td class="{{selectedModeClass 'utc-wall-clock'}}"><code>{{utcWallClock item}}</code></td>
+                      <td class="{{selectedModeClass 'instant-in-zone'}}"><code>{{instantInZone item}}</code></td>
+                      <td class="{{selectedModeClass 'date-only'}}"><code>{{dateOnlyAlternative item}}</code></td>
+                      <td>{{itemClassification item}}</td>
+                      <td>{{itemDayShift item}}</td>
+                      <td><small>{{itemWarnings item}}</small></td>
+                    </tr>
+                  {{else}}
+                    <tr><td colspan="10" class="text-center text-body-secondary py-4">{{t "timecard_migration.no_preview_rows"}}</td></tr>
+                  {{/each}}
+                </tbody>
+              </table>
+            </div>
+            <div class="d-flex justify-content-between align-items-center mb-3">
+              <small>{{t "timecard_migration.page_of_total" page=previewPage total=previewTotal}}</small>
+              <div class="btn-group">
+                <button type="button" class="btn btn-outline-secondary js-preview-previous" {{disabledUnless previewHasPrevious}}>{{t "timecard_migration.previous"}}</button>
+                <button type="button" class="btn btn-outline-secondary js-preview-next" {{disabledUnless previewHasNext}}>{{t "timecard_migration.next"}}</button>
+              </div>
+            </div>
+
+          {{#if runCanPrepare}}
+            <div class="d-flex flex-wrap gap-2">
+              <button type="button" class="btn btn-outline-danger js-cancel-preview">{{t "timecard_migration.cancel_and_change"}}</button>
+              <button type="button" class="btn btn-primary js-go-to-backup">{{t "timecard_migration.continue_to_backup"}} <i class="fa fa-arrow-right ms-1"></i></button>
+            </div>
+          {{else}}
+            <div class="alert alert-secondary mb-0">{{t "timecard_migration.history_read_only" status=runStatus}}</div>
+          {{/if}}
+        </section>
+      {{/if}}
+
+      {{#if isStep 4}}
+        <section aria-labelledby="migration-backup-heading">
+          <h4 id="migration-backup-heading">{{t "timecard_migration.backup_title"}}</h4>
+          <div class="alert alert-info">
+            <i class="fa fa-shield-alt me-2"></i>{{t "timecard_migration.backup_help"}}
+          </div>
+          <p>{{t "timecard_migration.backup_frozen_help"}}</p>
+
+          <button type="button" class="btn btn-primary js-prepare-backup mb-3" {{disabledIf backupLoading}}>
+            {{#if backupLoading}}<span class="spinner-border spinner-border-sm me-1"></span>{{/if}}
+            {{t "timecard_migration.verify_backup"}}
+          </button>
+
+          {{#if backupResult}}
+            <div class="row g-3 mb-4">
+              <div class="col-md-4"><div class="card h-100"><div class="card-body"><strong>{{t "timecard_migration.backup_records"}}</strong><div class="fs-4">{{backupCount}}</div></div></div></div>
+              <div class="col-md-4"><div class="card h-100"><div class="card-body"><strong>{{t "timecard_migration.integrity"}}</strong><div class="fs-4">{{backupIntegrity}}</div></div></div></div>
+              <div class="col-md-4"><div class="card h-100"><div class="card-body"><strong>{{t "timecard_migration.checksum"}}</strong><div class="text-break"><code>{{backupChecksum}}</code></div></div></div></div>
+            </div>
+            {{#if backupReady}}
+              <div class="alert alert-success"><i class="fa fa-check-circle me-2"></i>{{t "timecard_migration.backup_verified"}}</div>
+            {{else}}
+              <div class="alert alert-danger"><i class="fa fa-times-circle me-2"></i>{{t "timecard_migration.backup_failed"}}</div>
+            {{/if}}
+            <div class="card mb-4">
+              <div class="card-body">
+                <h5>{{t "timecard_migration.export_backup"}}</h5>
+                <p class="small text-body-secondary">{{t "timecard_migration.export_backup_help"}}</p>
+                <div class="table-responsive mb-3" aria-busy="{{backupExportLoading}}">
+                  <table class="table table-sm align-middle mb-0">
+                    <caption class="visually-hidden">{{t "timecard_migration.backup_table_caption"}}</caption>
+                    <thead>
+                      <tr>
+                        <th scope="col">{{t "timecard_migration.context"}}</th>
+                        <th scope="col">{{t "timecard_migration.original_value"}}</th>
+                        <th scope="col">{{t "timecard_migration.checksum"}}</th>
+                        <th scope="col">{{t "timecard_migration.frozen"}}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {{#each item in backupExportItems}}
+                        <tr>
+                          <td><code>{{item.timecardId}}</code><br><small>{{t "globals.user"}}: <code>{{item.original.userId}}</code><br>{{t "globals.project"}}: <code>{{item.original.projectId}}</code><br>{{t "globals.task"}}: {{item.original.task}}</small></td>
+                          <td><code>{{backupOriginal item}}</code></td>
+                          <td><code class="small text-break">{{item.originalChecksum}}</code></td>
+                          <td><span class="text-nowrap">{{backupFrozenAt item}}</span></td>
+                        </tr>
+                      {{else}}
+                        <tr><td colspan="4" class="text-center text-body-secondary py-3">{{t "timecard_migration.no_backup_rows"}}</td></tr>
+                      {{/each}}
+                    </tbody>
+                  </table>
+                </div>
+                <div class="d-flex flex-wrap justify-content-end align-items-center gap-2">
+                  <button type="button" class="btn btn-outline-secondary js-backup-export-previous" aria-label="{{t 'timecard_migration.previous'}}" {{disabledUnless backupExportHasPrevious}}><i class="fa fa-chevron-left"></i></button>
+                  <span aria-live="polite">{{t "timecard_migration.page_of_pages" page=backupExportPage pages=backupExportTotalPages total=backupExportTotal}}</span>
+                  <button type="button" class="btn btn-outline-secondary js-backup-export-next" aria-label="{{t 'timecard_migration.next'}}" {{disabledUnless backupExportHasNext}}><i class="fa fa-chevron-right"></i></button>
+                  <button type="button" class="btn btn-outline-primary js-download-backup-page" {{disabledIf backupExportLoading}}>
+                    <span class="migration-download-icon" aria-hidden="true"><i class="fa fa-download me-1"></i></span>
+                    {{t "timecard_migration.download_backup_page"}}
+                    {{#if backupExportLoading}}<span class="spinner-border spinner-border-sm ms-1" aria-hidden="true"></span>{{/if}}
+                  </button>
+                </div>
+              </div>
+            </div>
+          {{/if}}
+
+          <div class="d-flex flex-wrap gap-2">
+            <button type="button" class="btn btn-outline-secondary js-go-to-preview"><i class="fa fa-arrow-left me-1"></i>{{t "timecard_migration.back"}}</button>
+            {{#if backupReady}}
+              <button type="button" class="btn btn-warning js-go-to-apply">{{t "timecard_migration.continue_to_apply"}} <i class="fa fa-arrow-right ms-1"></i></button>
+            {{else}}
+              <button type="button" class="btn btn-warning" disabled>{{t "timecard_migration.continue_to_apply"}}</button>
+            {{/if}}
+          </div>
+        </section>
+      {{/if}}
+
+      {{#if isStep 5}}
+        <section aria-labelledby="migration-apply-heading">
+          <h4 id="migration-apply-heading">{{t "timecard_migration.apply_title"}}</h4>
+          <div class="alert alert-warning">
+            <strong>{{t "timecard_migration.write_lock_title"}}</strong><br>
+            {{t "timecard_migration.write_lock_help"}}
+          </div>
+
+          <div class="mb-3">
+            <label class="form-label" for="migrationApplyConfirmation">{{t "timecard_migration.type_migrate"}}</label>
+            <input id="migrationApplyConfirmation" class="form-control js-apply-confirmation" value="{{applyConfirmation}}" autocomplete="off">
+          </div>
+
+          <div class="progress mb-2" role="progressbar" aria-valuenow="{{progressPercentage}}" aria-valuemin="0" aria-valuemax="100">
+            <div class="progress-bar progress-bar-striped {{batchProgressClass}}" style="width: {{progressPercentage}}%">{{progressPercentage}}%</div>
+          </div>
+          <div class="row row-cols-2 row-cols-lg-5 g-2 mb-4 small">
+            <div><strong>{{t "timecard_migration.total"}}:</strong> {{progress.total}}</div>
+            <div><strong>{{t "timecard_migration.processed"}}:</strong> {{progress.processed}}</div>
+            <div><strong>{{t "timecard_migration.applied"}}:</strong> {{progress.applied}}</div>
+            <div><strong>{{t "timecard_migration.conflicts"}}:</strong> {{progress.conflicts}}</div>
+            <div><strong>{{t "timecard_migration.failed"}}:</strong> {{progress.failed}}</div>
+          </div>
+
+          <div class="d-flex flex-wrap gap-2">
+            {{#if isPaused}}
+              <button type="button" class="btn btn-primary js-resume-apply"><i class="fa fa-play me-1"></i>{{t "timecard_migration.resume"}}</button>
+              {{#if canCancelPausedApply}}
+                <button type="button" class="btn btn-outline-danger js-cancel-preview">{{t "timecard_migration.cancel_and_change"}}</button>
+              {{/if}}
+            {{else}}
+              {{#if batchLoading}}
+                <button type="button" class="btn btn-outline-secondary js-pause-apply"><i class="fa fa-pause me-1"></i>{{t "timecard_migration.pause"}}</button>
+              {{else}}
+                {{#if applyConfirmationMatches}}
+                  <button type="button" class="btn btn-danger js-start-apply">{{t "timecard_migration.apply_migration"}}</button>
+                {{else}}
+                  <button type="button" class="btn btn-danger" disabled>{{t "timecard_migration.apply_migration"}}</button>
+                {{/if}}
+              {{/if}}
+            {{/if}}
+            {{#if applyComplete}}
+              <button type="button" class="btn btn-outline-primary js-go-to-verify">{{t "timecard_migration.go_to_verification"}}</button>
+            {{else}}
+              <button type="button" class="btn btn-outline-primary" disabled>{{t "timecard_migration.go_to_verification"}}</button>
+            {{/if}}
+          </div>
+        </section>
+      {{/if}}
+
+      {{#if isStep 6}}
+        <section aria-labelledby="migration-verify-heading">
+          <h4 id="migration-verify-heading">{{t "timecard_migration.verify_title"}}</h4>
+          <p>{{t "timecard_migration.verify_help"}}</p>
+          {{#if canRunVerification}}
+            <button type="button" class="btn btn-primary js-verify mb-3" {{disabledIf verifyLoading}}>
+              {{#if verifyLoading}}<span class="spinner-border spinner-border-sm me-1"></span>{{/if}}
+              {{t "timecard_migration.run_verification"}}
+            </button>
+          {{else}}
+            <button type="button" class="btn btn-primary mb-3" disabled>{{t "timecard_migration.run_verification"}}</button>
+          {{/if}}
+          {{#if verification}}
+            <div class="alert {{#if verificationPassed}}alert-success{{else}}alert-danger{{/if}}" role="status">
+              <strong>{{t "timecard_migration.verification_result"}}:</strong>
+              {{#if verificationPassed}}{{t "timecard_migration.passed"}}{{else}}{{t "timecard_migration.failed"}}{{/if}}
+            </div>
+            <pre class="border rounded p-3 small migration-machine-report">{{verificationReport}}</pre>
+          {{/if}}
+
+          {{#if hasApplyConflicts}}
+            <div class="card my-4 border-warning">
+              <div class="card-body">
+                <h5>{{t "timecard_migration.apply_conflicts_title"}}</h5>
+                <p class="small text-body-secondary">{{t "timecard_migration.apply_conflicts_help"}}</p>
+                {{#if applyConflictsLoading}}
+                  <div class="text-center py-3"><span class="spinner-border spinner-border-sm"></span></div>
+                {{else}}
+                  <div class="table-responsive">
+                    <table class="table table-sm align-middle">
+                      <thead>
+                        <tr>
+                          <th>{{t "timecard_migration.context"}}</th>
+                          <th>{{t "timecard_migration.original_value"}}</th>
+                          <th>{{t "timecard_migration.migrated_value"}}</th>
+                          <th>{{t "timecard_migration.current_value"}}</th>
+                          <th>{{t "timecard_migration.status"}}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {{#each item in applyConflictItems}}
+                          <tr class="table-warning">
+                            <td><code>{{item.timecardId}}</code><br><small>{{t "globals.user"}}: <code>{{item.userId}}</code><br>{{t "globals.project"}}: <code>{{item.projectId}}</code><br>{{t "globals.task"}}: {{item.task}}</small></td>
+                            <td><code>{{rawDate item}}</code></td>
+                            <td><code>{{selectedProposal item}}</code></td>
+                            <td><code>{{restoreCurrent item}}</code></td>
+                            <td>{{item.status}}<br><small>{{applyConflictError item}}</small></td>
+                          </tr>
+                        {{else}}
+                          <tr><td colspan="5" class="text-center text-body-secondary">{{t "timecard_migration.no_apply_conflicts"}}</td></tr>
+                        {{/each}}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div class="d-flex justify-content-between align-items-center">
+                    <small>{{t "timecard_migration.page_of_total" page=applyConflictPage total=applyConflictTotal}}</small>
+                    <div class="btn-group">
+                      <button type="button" class="btn btn-sm btn-outline-secondary js-apply-conflicts-previous" {{disabledUnless applyConflictHasPrevious}}>{{t "timecard_migration.previous"}}</button>
+                      <button type="button" class="btn btn-sm btn-outline-secondary js-apply-conflicts-next" {{disabledUnless applyConflictHasNext}}>{{t "timecard_migration.next"}}</button>
+                    </div>
+                  </div>
+                {{/if}}
+              </div>
+            </div>
+          {{/if}}
+
+          {{#if backupResult}}
+            <div class="card my-4">
+              <div class="card-body">
+                <h5>{{t "timecard_migration.export_backup"}}</h5>
+                <p class="small text-body-secondary">{{t "timecard_migration.export_backup_help"}}</p>
+                <div class="d-flex flex-wrap align-items-center gap-2">
+                  <button type="button" class="btn btn-sm btn-outline-secondary js-backup-export-previous" aria-label="{{t 'timecard_migration.previous'}}" {{disabledUnless backupExportHasPrevious}}><i class="fa fa-chevron-left"></i></button>
+                  <span>{{t "timecard_migration.page_of_pages" page=backupExportPage pages=backupExportTotalPages total=backupExportTotal}}</span>
+                  <button type="button" class="btn btn-sm btn-outline-secondary js-backup-export-next" aria-label="{{t 'timecard_migration.next'}}" {{disabledUnless backupExportHasNext}}><i class="fa fa-chevron-right"></i></button>
+                  <button type="button" class="btn btn-sm btn-outline-primary js-download-backup-page" {{disabledIf backupExportLoading}}>
+                    <span class="migration-download-icon" aria-hidden="true"><i class="fa fa-download me-1"></i></span>
+                    {{t "timecard_migration.download_backup_page"}}
+                    {{#if backupExportLoading}}<span class="spinner-border spinner-border-sm ms-1" aria-hidden="true"></span>{{/if}}
+                  </button>
+                </div>
+              </div>
+            </div>
+          {{/if}}
+
+          {{#if restoreRunId}}
+            <hr class="my-4">
+            <h4>{{t "timecard_migration.restore_preview_title"}}</h4>
+            <div class="alert alert-warning">{{t "timecard_migration.restore_help" runId=restoreRunId}}</div>
+            {{#if restoreSummary}}<pre class="border rounded p-3 small migration-machine-report">{{restoreSummary}}</pre>{{/if}}
+            {{#if restoreLoading}}
+              <div class="text-center py-4"><span class="spinner-border"></span></div>
+            {{else}}
+              <div class="table-responsive">
+                <table class="table table-sm">
+                  <thead><tr><th>{{t "timecard_migration.timecard"}}</th><th>{{t "timecard_migration.original_value"}}</th><th>{{t "timecard_migration.migrated_value"}}</th><th>{{t "timecard_migration.current_value"}}</th><th>{{t "timecard_migration.conflict"}}</th></tr></thead>
+                  <tbody>
+                    {{#each item in restoreItems}}
+                      <tr>
+                        <td><code>{{item.timecardId}}</code><br><small>{{item.status}}</small></td>
+                        <td><code>{{restoreOriginal item}}</code></td>
+                        <td><code>{{restoreMigrated item}}</code></td>
+                        <td><code>{{restoreCurrent item}}</code></td>
+                        <td class="text-warning-emphasis">{{restoreConflict item}}</td>
+                      </tr>
+                    {{else}}
+                      <tr><td colspan="5" class="text-center text-body-secondary">{{t "timecard_migration.no_restore_rows"}}</td></tr>
+                    {{/each}}
+                  </tbody>
+                </table>
+              </div>
+              <div class="d-flex justify-content-end mb-3">
+                <div class="btn-group">
+                  <button type="button" class="btn btn-outline-secondary js-restore-previous" {{disabledUnless restoreHasPrevious}}>{{t "timecard_migration.previous"}}</button>
+                  <span class="btn btn-outline-secondary disabled">{{restorePage}}</span>
+                  <button type="button" class="btn btn-outline-secondary js-restore-next" {{disabledUnless restoreHasNext}}>{{t "timecard_migration.next"}}</button>
+                </div>
+              </div>
+            {{/if}}
+
+            <div class="progress mb-3">
+              <div class="progress-bar bg-warning text-dark" style="width: {{restoreProgressPercentage}}%">{{restoreProgressPercentage}}%</div>
+            </div>
+            {{#if restoreTerminal}}
+              <div class="alert alert-secondary mb-0">{{t "timecard_migration.history_read_only" status=restoreRunStatus}}</div>
+            {{else}}
+              <label class="form-label" for="migrationRestoreConfirmation">{{t "timecard_migration.type_restore"}}</label>
+              <input id="migrationRestoreConfirmation" class="form-control js-restore-confirmation mb-3" value="{{restoreConfirmation}}" autocomplete="off">
+              <div class="d-flex gap-2">
+                {{#if restoreBatchLoading}}
+                  <button type="button" class="btn btn-outline-secondary js-pause-restore"><i class="fa fa-pause me-1"></i>{{t "timecard_migration.pause"}}</button>
+                {{else}}
+                  {{#if isRestorePaused}}
+                    <button type="button" class="btn btn-primary js-resume-restore"><i class="fa fa-play me-1"></i>{{t "timecard_migration.resume"}}</button>
+                  {{else}}
+                    {{#if restoreCanStart}}
+                      <button type="button" class="btn btn-warning js-start-restore">{{t "timecard_migration.restore_backup"}}</button>
+                    {{else}}
+                      <button type="button" class="btn btn-warning" disabled>{{t "timecard_migration.restore_backup"}}</button>
+                    {{/if}}
+                  {{/if}}
+                {{/if}}
+              </div>
+            {{/if}}
+          {{/if}}
+        </section>
+      {{/if}}
+    </div>
+  </div>
+
+  <div class="card timecard-migration">
+    <div class="card-header d-flex justify-content-between align-items-center">
+      <strong>{{t "timecard_migration.history_title"}}</strong>
+      {{#if historyLoading}}<span class="spinner-border spinner-border-sm"></span>{{/if}}
+    </div>
+    <div class="table-responsive">
+      <table class="table table-sm table-hover mb-0 align-middle">
+        <thead><tr><th>{{t "timecard_migration.run"}}</th><th>{{t "timecard_migration.created"}}</th><th>{{t "timecard_migration.method"}}</th><th>{{t "timecard_migration.company_time_zone"}}</th><th>{{t "timecard_migration.status"}}</th><th>{{t "globals.actions"}}</th></tr></thead>
+        <tbody>
+          {{#each historyRun in historyItems}}
+            <tr>
+              <td><code>{{historyRunId historyRun}}</code></td>
+              <td>{{historyDate historyRun}}</td>
+              <td>{{historyMode historyRun}}</td>
+              <td>{{historyTimeZone historyRun}}</td>
+              <td><span class="badge {{historyStatusClass historyRun}}">{{historyStatus historyRun}}</span></td>
+              <td>
+                <button type="button" class="btn btn-sm btn-outline-primary js-inspect-run" data-run-id="{{historyRunId historyRun}}" {{disabledIf historyActionsDisabled}}>{{t "timecard_migration.inspect"}}</button>
+                {{#if canRestore historyRun}}
+                  <button type="button" class="btn btn-sm btn-outline-warning js-preview-restore" data-run-id="{{historyRunId historyRun}}" {{disabledIf historyActionsDisabled}}>{{t "timecard_migration.preview_restore"}}</button>
+                {{/if}}
+              </td>
+            </tr>
+          {{else}}
+            <tr><td colspan="6" class="text-center text-body-secondary py-4">{{t "timecard_migration.no_history"}}</td></tr>
+          {{/each}}
+        </tbody>
+      </table>
+    </div>
+    <div class="card-footer d-flex justify-content-end">
+      <div class="btn-group">
+        <button type="button" class="btn btn-outline-secondary js-history-previous" {{disabledUnless historyHasPrevious}}>{{t "timecard_migration.previous"}}</button>
+        <span class="btn btn-outline-secondary disabled">{{historyPage}}</span>
+        <button type="button" class="btn btn-outline-secondary js-history-next" {{disabledUnless historyHasNext}}>{{t "timecard_migration.next"}}</button>
+      </div>
+    </div>
+  </div>
+</template>
