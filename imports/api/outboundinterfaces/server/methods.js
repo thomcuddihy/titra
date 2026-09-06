@@ -2,10 +2,72 @@ import { check, Match } from 'meteor/check'
 import { fetch, Headers } from 'meteor/fetch'
 import { ValidatedMethod } from 'meteor/mdg:validated-method'
 import { NodeVM } from '../../../utils/vm_sandbox.js'
+import { legacyScriptDecision } from '../../../utils/legacyScriptPolicy.js'
 import {
   adminAuthenticationMixin, authenticationMixin, transactionLogMixin,
 } from '../../../utils/server_method_helpers'
 import OutboundInterfaces from '../outboundinterfaces.js'
+
+const PUBLIC_OUTBOUND_INTERFACE_FIELDS = Object.freeze({
+  name: 1,
+  description: 1,
+  faIcon: 1,
+  active: 1,
+})
+
+const MAX_OUTBOUND_ITEMS = 10000
+const MAX_OUTBOUND_DEPTH = 20
+const MAX_OUTBOUND_KEYS = 100000
+const MAX_OUTBOUND_SERIALIZED_BYTES = 5 * 1024 * 1024
+const FORBIDDEN_OUTBOUND_KEYS = new Set(['__proto__', 'constructor', 'prototype'])
+
+function normalizeOutboundData(data) {
+  if (!Array.isArray(data) || data.length > MAX_OUTBOUND_ITEMS) {
+    throw new TypeError('Invalid outbound interface data.')
+  }
+  const ancestors = new WeakSet()
+  let keys = 0
+  const inspect = (value, depth) => {
+    if (value === null || typeof value === 'boolean') return
+    if (typeof value === 'string') {
+      if (!value.isWellFormed()) throw new TypeError('Invalid outbound interface data.')
+      return
+    }
+    if (typeof value === 'number') {
+      if (!Number.isFinite(value)) throw new TypeError('Invalid outbound interface data.')
+      return
+    }
+    if (typeof value !== 'object' || depth > MAX_OUTBOUND_DEPTH
+      || ancestors.has(value)) throw new TypeError('Invalid outbound interface data.')
+    const prototype = Object.getPrototypeOf(value)
+    if (Array.isArray(value)) {
+      if (prototype !== Array.prototype) throw new TypeError('Invalid outbound interface data.')
+    } else if (prototype !== Object.prototype && prototype !== null) {
+      throw new TypeError('Invalid outbound interface data.')
+    }
+    const ownKeys = Reflect.ownKeys(value)
+    if (ownKeys.some((key) => typeof key !== 'string' || FORBIDDEN_OUTBOUND_KEYS.has(key))) {
+      throw new TypeError('Invalid outbound interface data.')
+    }
+    keys += ownKeys.length
+    if (keys > MAX_OUTBOUND_KEYS) throw new TypeError('Invalid outbound interface data.')
+    ancestors.add(value)
+    ownKeys.forEach((key) => {
+      const descriptor = Object.getOwnPropertyDescriptor(value, key)
+      if (!descriptor || !Object.hasOwn(descriptor, 'value')) {
+        throw new TypeError('Invalid outbound interface data.')
+      }
+      inspect(descriptor.value, depth + 1)
+    })
+    ancestors.delete(value)
+  }
+  inspect(data, 0)
+  const serialized = JSON.stringify(data)
+  if (Buffer.byteLength(serialized, 'utf8') > MAX_OUTBOUND_SERIALIZED_BYTES) {
+    throw new TypeError('Invalid outbound interface data.')
+  }
+  return JSON.parse(serialized)
+}
 
 /**
  * Inserts a new outbound interface into the system.
@@ -34,6 +96,12 @@ const outboundinterfacesinsert = new ValidatedMethod({
   async run({
     name, description, processData, active, faIcon,
   }) {
+    if (active && !legacyScriptDecision('outbound-interface').allowed) {
+      throw new Meteor.Error(
+        'unsafe-legacy-script-disabled',
+        'Legacy JavaScript interfaces cannot be activated without the server security opt-in.',
+      )
+    }
     await OutboundInterfaces.insertAsync({
       name,
       description,
@@ -83,6 +151,12 @@ const outboundinterfacesupdate = new ValidatedMethod({
     faIcon,
     active,
   }) {
+    if (active && !legacyScriptDecision('outbound-interface').allowed) {
+      throw new Meteor.Error(
+        'unsafe-legacy-script-disabled',
+        'Legacy JavaScript interfaces cannot be activated without the server security opt-in.',
+      )
+    }
     await OutboundInterfaces.updateAsync({ _id }, {
       $set: {
         name,
@@ -132,20 +206,39 @@ const outboundinterfacesrun = new ValidatedMethod({
   },
   mixins: [authenticationMixin],
   async run({ _id, data }) {
-    const outboundInterface = await OutboundInterfaces.findOneAsync({ _id })
-    if (outboundInterface) {
-      const vm = new NodeVM({
-        console: 'inherit',
-        sandbox: {
-          fetch,
-          data,
-          Headers,
-        },
-      })
+    if (!legacyScriptDecision('outbound-interface').allowed) {
+      throw new Meteor.Error(
+        'unsafe-legacy-script-disabled',
+        'Legacy JavaScript interfaces are disabled by the server security policy.',
+      )
+    }
+    const outboundInterface = await OutboundInterfaces.findOneAsync({
+      _id,
+      active: true,
+      processData: { $type: 'string' },
+    }, { fields: { processData: 1 } })
+    if (!outboundInterface) {
+      throw new Meteor.Error('not-authorized', 'Interface is not available.')
+    }
+    let safeData
+    try {
+      safeData = normalizeOutboundData(data)
+    } catch {
+      throw new Meteor.Error('interface-invalid-data', 'Interface data is invalid.')
+    }
+    const vm = new NodeVM({
+      sandbox: {
+        fetch,
+        data: safeData,
+        Headers,
+      },
+    })
+    try {
       await vm.run(outboundInterface.processData)
       return 'notifications.success'
+    } catch {
+      throw new Meteor.Error('interface-execution-failed', 'Interface execution failed.')
     }
-    return false
   },
 })
 /**
@@ -160,7 +253,9 @@ const getOutboundInterfaces = new ValidatedMethod({
   validate: null,
   mixins: [authenticationMixin],
   async run() {
-    return OutboundInterfaces.find({ active: true }, { fields: { processData: 0 } }).fetchAsync()
+    if (!legacyScriptDecision('outbound-interface').allowed) return []
+    return OutboundInterfaces
+      .find({ active: true }, { fields: PUBLIC_OUTBOUND_INTERFACE_FIELDS }).fetchAsync()
   },
 })
 export {
@@ -169,4 +264,5 @@ export {
   outboundinterfacesremove,
   outboundinterfacesrun,
   getOutboundInterfaces,
+  normalizeOutboundData,
 }

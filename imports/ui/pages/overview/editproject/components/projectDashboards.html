@@ -32,7 +32,7 @@
                   </td>
                   <td>{{dashboardTimeperiod dashboard._id}}</td>
                   <td>
-                    {{#if dashboard.password}}
+                    {{#if dashboard.hasPassword}}
                       <i class="fas fa-lock text-success" title="{{t "dashboard.password_set"}}"></i>
                     {{else}}
                       <i class="fas fa-lock-open text-muted" title="{{t "dashboard.no_password"}}"></i>

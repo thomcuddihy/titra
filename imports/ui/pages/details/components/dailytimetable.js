@@ -17,6 +17,8 @@ import {
   showToast
 } from '../../../../utils/frontend_helpers'
 import { i18nReady, t } from '../../../../utils/i18n.js'
+import { encodeCsv } from '../../../../utils/csvExport.js'
+import { secureDataTableColumns } from '../../../../utils/dataTableSecurity.js'
 
 Template.dailytimetable.onCreated(function dailytimetablecreated() {
   dayjs.extend(utc)
@@ -103,13 +105,14 @@ Template.dailytimetable.onRendered(() => {
           format: numberWithUserPrecision,
         },
       )
+      const securedColumns = secureDataTableColumns(columns)
       if (!templateInstance.datatable) {
         import('frappe-datatable/dist/frappe-datatable.css').then(() => {
           import('frappe-datatable').then((datatable) => {
             const DataTable = datatable.default
             try {
               templateInstance.datatable = new DataTable('#datatable-container', {
-                columns,
+                columns: securedColumns,
                 serialNoColumn: false,
                 clusterize: false,
                 layout: 'ratio',
@@ -126,7 +129,7 @@ Template.dailytimetable.onRendered(() => {
       if (templateInstance.datatable && templateInstance.dailyTimecards.get()
         && window.BootstrapLoaded.get() && data.length > 0) {
         try {
-          templateInstance.datatable.refresh(data, columns)
+          templateInstance.datatable.refresh(data, securedColumns)
         } catch (error) {
           console.error(`Caught error: ${error}`)
         }
@@ -154,18 +157,20 @@ Template.dailytimetable.events({
     if (Meteor.user()) {
       unit = getUserTimeUnitVerbose()
     }
-    let csvArray = [`\uFEFF${t('globals.date')},${t('globals.project')},${t('globals.resource')},${unit}\r\n`]
-    if (!getGlobalSetting('showResourceInDetails')) {
-      csvArray = [`\uFEFF${t('globals.date')},${t('globals.project')},${unit}\r\n`]
-    }
+    const showResource = getGlobalSetting('showResourceInDetails')
+    const csvRows = [[t('globals.date'), t('globals.project')]]
+    if (showResource) csvRows[0].push(t('globals.resource'))
+    csvRows[0].push(unit)
     for (const timeEntry of templateInstance.dailyTimecards.get().map(dailyTimecardMapper)) {
-      if (getGlobalSetting('showResourceInDetails')) {
-        csvArray.push(`${dayjs.utc(timeEntry.date).format(getGlobalSetting('dateformat'))},${timeEntry.projectId},${timeEntry.userId},${timeEntry.totalHours}\r\n`)
-      } else {
-        csvArray.push(`${dayjs.utc(timeEntry.date).format(getGlobalSetting('dateformat'))},${timeEntry.projectId},${timeEntry.totalHours}\r\n`)
-      }
+      const row = [
+        dayjs.utc(timeEntry.date).format(getGlobalSetting('dateformat')),
+        timeEntry.projectId,
+      ]
+      if (showResource) row.push(timeEntry.userId)
+      row.push(timeEntry.totalHours)
+      csvRows.push(row)
     }
-    saveAs(new Blob(csvArray, { type: 'text/csv;charset=utf-8;header=present' }), `titra_daily_time_${templateInstance.data.period.get()}.csv`)
+    saveAs(new Blob([encodeCsv(csvRows)], { type: 'text/csv;charset=utf-8;header=present' }), `titra_daily_time_${templateInstance.data.period.get()}.csv`)
   },
   'click .js-export-xlsx': (event, templateInstance) => {
     event.preventDefault()

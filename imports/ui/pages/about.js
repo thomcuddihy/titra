@@ -3,6 +3,30 @@ import { t } from '../../utils/i18n.js'
 import { emojify, getGlobalSetting } from '../../utils/frontend_helpers'
 import './about.html'
 
+const CHANGELOG_URL = 'https://github.com/kromitgmbh/titra/tags'
+const CHANGELOG_API_URL = 'https://api.github.com/repos/kromitgmbh/titra'
+
+function showChangelogError(templateInstance) {
+  templateInstance.$('#titra-changelog').text(t('settings.titra_changelog_error'))
+}
+
+function renderChangelog(templateInstance, { tagName, date, message }) {
+  const target = templateInstance.$('#titra-changelog').get(0)
+  if (!target) return
+  const link = document.createElement('a')
+  link.href = CHANGELOG_URL
+  link.target = '_blank'
+  link.rel = 'noopener noreferrer'
+  link.textContent = tagName
+  target.replaceChildren(
+    document.createTextNode('Version '),
+    link,
+    document.createTextNode(` (${date}) :`),
+    document.createElement('br'),
+    document.createTextNode(message),
+  )
+}
+
 Template.about.onCreated(function aboutCreated() {
   this.statistics = new ReactiveVar()
   Meteor.call('getStatistics', (error, result) => {
@@ -17,14 +41,29 @@ Template.about.events({
   'click #retrieveChangeLog': (event, templateInstance) => {
     event.preventDefault()
     if (!templateInstance.$('#changelog').hasClass('show')) {
-      $.getJSON('https://api.github.com/repos/kromitgmbh/titra/tags', (data) => {
-        const tag = data[2]
-        $.getJSON(tag.commit.url, async (commitData) => {
-          templateInstance.$('#titra-changelog').html(`Version <a href='https://github.com/kromitgmbh/titra/tags' target='_blank'>${tag.name}</a> (${dayjs(commitData.commit.committer.date).format(getGlobalSetting('dateformat'))}) :<br/>${await emojify(commitData.commit.message)}`)
-        })
-      }).fail(() => {
-        templateInstance.$('#titra-changelog').html(t('settings.titra_changelog_error'))
-      })
+      $.getJSON(`${CHANGELOG_API_URL}/tags`).done((data) => {
+        const tag = Array.isArray(data) ? data[2] : undefined
+        const sha = typeof tag?.commit?.sha === 'string' ? tag.commit.sha : ''
+        if (!/^[\da-f]{40,64}$/iu.test(sha)) {
+          showChangelogError(templateInstance)
+          return
+        }
+        $.getJSON(`${CHANGELOG_API_URL}/commits/${encodeURIComponent(sha)}`).done(async (commitData) => {
+          try {
+            const tagName = typeof tag.name === 'string' ? [...tag.name].slice(0, 200).join('') : ''
+            const rawMessage = typeof commitData?.commit?.message === 'string'
+              ? [...commitData.commit.message].slice(0, 20000).join('') : ''
+            renderChangelog(templateInstance, {
+              tagName,
+              date: dayjs(commitData?.commit?.committer?.date)
+                .format(getGlobalSetting('dateformat')),
+              message: await emojify(rawMessage),
+            })
+          } catch {
+            showChangelogError(templateInstance)
+          }
+        }).fail(() => showChangelogError(templateInstance))
+      }).fail(() => showChangelogError(templateInstance))
     }
   },
 })

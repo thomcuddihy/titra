@@ -16,6 +16,21 @@ import BsDialogs from '../../../shared components/bootstrapDialogs.js'
 import '../../track/components/projectTasks.js'
 import './components/importcsv.js'
 import './components/projectDashboards.js'
+import {
+  plainTextToSafeHtml,
+  projectDescriptionText,
+} from '../../../../utils/userContentSecurity.js'
+
+function setEditorDescription(templateInstance, description) {
+  if (templateInstance.quill) {
+    templateInstance.quill.setHtml(plainTextToSafeHtml(description))
+  }
+}
+
+function editorPlainText(templateInstance) {
+  const editor = templateInstance.$('#richDesc .ql-editor').get(0)
+  return (editor?.innerText || '').replace(/\r\n?/gu, '\n').replace(/\n$/u, '')
+}
 
 Template.editproject.onCreated(function editprojectSetup() {
   this.deletion = new ReactiveVar(false)
@@ -68,13 +83,8 @@ Template.editproject.onRendered(() => {
     if (templateInstance.handle
         && templateInstance.handle.ready() && !templateInstance.deletion.get()) {
       if (project) {
-        if (project.desc instanceof Object && templateInstance.quillReady.get()) {
-          import('quill-delta-to-html').then((deltaToHtml) => {
-            const converter = new deltaToHtml.QuillDeltaToHtmlConverter(project.desc.ops, {})
-            templateInstance.quill.setHtml(converter.convert())
-          })
-        } else if (project.desc && templateInstance.quillReady.get()) {
-          templateInstance.quill.setHtml(project.desc)
+        if (templateInstance.quillReady.get()) {
+          setEditorDescription(templateInstance, projectDescriptionText(project.desc))
         }
         for (const customfield of CustomFields.find({ classname: 'project', possibleValues: { $exists: true } })) {
           waitForElement(templateInstance, `#${customfield.name}`).then((element) => {
@@ -86,27 +96,12 @@ Template.editproject.onRendered(() => {
             element.value = project.customer
           })
         }
-      } else if (project?.desc instanceof Object && templateInstance.quill) {
-        import('quill-delta-to-html').then((deltaToHtml) => {
-          const converter = new deltaToHtml.QuillDeltaToHtmlConverter(project.desc.ops, {})
-          templateInstance.quill.setHtml(converter.convert())
-        })
-      } else if (project?.desc && templateInstance.quill) {
-        templateInstance.quill.setHtml(project.desc)
       }
       if (project?.color || templateInstance.color) {
         templateInstance.$('#color').val(project?.color
           ? project.color : templateInstance.color)
       } else {
         templateInstance.$('#color').val('#009688')
-      }
-      if (project.desc instanceof Object && templateInstance.quill) {
-        import('quill-delta-to-html').then((deltaToHtml) => {
-          const converter = new deltaToHtml.QuillDeltaToHtmlConverter(project.desc.ops, {})
-          templateInstance.quill.setHtml(converter.convert())
-        })
-      } else if (project.desc && templateInstance.quill) {
-        templateInstance.quill.setHtml(project.desc)
       }
     } else if (FlowRouter.getRouteName() !== 'createProject' && !templateInstance.deletion) {
       FlowRouter.go('404')
@@ -136,11 +131,7 @@ Template.editproject.events({
       templateInstance.$('#target').val(Number(templateInstance.$('#target').val()) / 60)
     }
     const projectArray = templateInstance.$('#editProjectForm').serializeArray()
-    if (Template.instance().quill.getHtml(true)) {
-      projectArray.push({ name: 'desc', value: Template.instance().quill.getHtml(true) })
-    } else {
-      projectArray.push({ name: 'desc', value: '' })
-    }
+    projectArray.push({ name: 'desc', value: editorPlainText(templateInstance) })
     if (getUserSetting('timeunit') === 'd') {
       templateInstance.$('#target').val(templateInstance.$('#target').val() * (getUserSetting('hoursToDays')))
     }
@@ -166,6 +157,7 @@ Template.editproject.events({
       }, (error) => {
         if (!error) {
           templateInstance.$('#name').removeClass('is-invalid')
+          templateInstance.$('#wekanurl').val('')
           showToast(t('notifications.project_update_success'))
         } else {
           console.error(error)

@@ -1,15 +1,114 @@
 import dayjs from 'dayjs'
 import utc from 'dayjs/plugin/utc'
-import isBetween from 'dayjs/plugin/isBetween'
 import { check, Match } from 'meteor/check'
 import { ValidatedMethod } from 'meteor/mdg:validated-method'
+import { OAuth } from 'meteor/oauth'
 import Timecards from '../../timecards/timecards'
 import Projects from '../projects.js'
 import Tasks from '../../tasks/tasks.js'
-import { addNotification } from '../../notifications/notifications.js'
+import { addNotification } from '../../notifications/server/addNotification.js'
 import { emojify } from '../../../utils/frontend_helpers'
 import { periodToDates } from '../../../utils/periodHelpers.js'
 import { authenticationMixin, transactionLogMixin, calculateSimilarity } from '../../../utils/server_method_helpers'
+import {
+  publicNameOnlyUser,
+  userSelectorForProjectAudience,
+} from '../../users/server/projectUserPrivacy.js'
+import {
+  projectAdministratorMutationSelector,
+  projectMutationMatched,
+  projectRateModifier,
+} from './ddpMutationGuards.js'
+import { normalizeProjectPresentationFields } from '../../../utils/userContentSecurity.js'
+import {
+  currentProjectAudienceClauses,
+  currentPublicProjectsDisabled,
+} from './publicAccessServer.js'
+import {
+  PublicProjectPolicyError,
+  assertPublicProjectValueAllowed,
+  canViewProjectUnderPolicy,
+} from './publicAccessPolicy.js'
+import normalizeWekanProjectFields from './wekanProjectSettings.js'
+import { requireOAuthEncryptionConfigured } from '../../../utils/oauthEncryptionPolicy.js'
+import {
+  MAX_PROJECT_SCOPE_IDS,
+  MAX_RESOURCE_SCOPE_TEXT,
+  assertBoundedDateRange,
+} from '../../../utils/resourceLimits.js'
+import {
+  TOP_TASK_RESULT_LIMIT,
+  aggregateBoundedProjectMethodRows,
+  aggregateProjectMethodScalar,
+  aggregateProjectMonthTotals,
+  bestProjectMatch,
+  fetchBoundedProjectMethodRows,
+} from './projectMethodReads.js'
+
+function protectWekanCredential(project) {
+  if (typeof project.wekanurl === 'string') {
+    requireOAuthEncryptionConfigured()
+    project.wekanurl = OAuth.sealSecret(project.wekanurl)
+  }
+  return project
+}
+
+function rethrowProjectPresentationValidation(error) {
+  if (error?.code) throw new Meteor.Error(error.code, error.message)
+  throw error
+}
+
+const forbiddenProjectMutationFields = new Set([
+  '_id', 'userId', 'team', 'admins', 'rates', 'archived',
+])
+
+function validProjectMutationField(name) {
+  return typeof name === 'string' && name.length > 0 && name.length <= 128
+    && !name.startsWith('$') && !name.includes('\0')
+    && !forbiddenProjectMutationFields.has(name.split('.')[0])
+    && !['__proto__', 'prototype', 'constructor'].includes(name.split('.')[0])
+}
+
+async function projectVisibleSelector(projectId, userId) {
+  return {
+    _id: projectId,
+    $or: await currentProjectAudienceClauses(userId),
+  }
+}
+
+async function assertProjectVisible(projectId, userId) {
+  const project = await Projects.findOneAsync(await projectVisibleSelector(projectId, userId), {
+    fields: { _id: 1 },
+  })
+  if (!project) throw new Meteor.Error('not-authorized')
+}
+
+function projectMutationModifier(modifier = {}) {
+  return modifier
+}
+
+function aggregateTimecards(pipeline, options) {
+  return Timecards.rawCollection().aggregate(pipeline, options).toArray()
+}
+
+async function boundedVisibleProjectIds(selector) {
+  const projects = await fetchBoundedProjectMethodRows({
+    find: (query, options) => Projects.find(query, options).fetchAsync(),
+    selector,
+    fields: { _id: 1 },
+    label: 'Visible projects',
+  })
+  const projectIds = projects.map((project) => project?._id)
+  if (projectIds.some((projectId) => typeof projectId !== 'string' || !projectId)) {
+    throw new TypeError('A visible project has an invalid identity.')
+  }
+  return projectIds
+}
+
+async function boundedPeriodRange(period, label) {
+  const { startDate, endDate } = await periodToDates(period)
+  return assertBoundedDateRange(startDate, endDate, { label })
+}
 
 /**
 Get the statistics of all projects based on the timecards.
@@ -30,23 +129,14 @@ const getAllProjectStats = new ValidatedMethod({
   async run({ includeNotBillableTime, showArchived, period }) {
     const notbillable = includeNotBillableTime
     dayjs.extend(utc)
-    dayjs.extend(isBetween)
-    const andCondition = [{
-      $or: [{ userId: this.userId }, { public: true }, { team: this.userId }],
-    }]
+    const andCondition = [{ $or: await currentProjectAudienceClauses(this.userId) }]
     if (!showArchived) {
       andCondition.push({ $or: [{ archived: false }, { archived: { $exists: false } }] })
     }
     if (!notbillable) {
       andCondition.push({ $or: [{ notbillable }, { notbillable: { $exists: false } }] })
     }
-    let projectList = await Projects.find({ $and: andCondition }, { _id: 1 })
-      .fetchAsync()
-    projectList = projectList.map((value) => value._id)
-    let totalHours = 0
-    let currentMonthHours = 0
-    let previousMonthHours = 0
-    let beforePreviousMonthHours = 0
+    const projectList = await boundedVisibleProjectIds({ $and: andCondition })
     const currentMonthName = dayjs.utc().format('MMM')
     const currentMonthStart = dayjs.utc().startOf('month')
     const currentMonthEnd = dayjs.utc().endOf('month')
@@ -56,40 +146,41 @@ const getAllProjectStats = new ValidatedMethod({
     const previousMonthEnd = dayjs.utc().subtract(1, 'month').endOf('month')
     const beforePreviousMonthStart = dayjs.utc().subtract(2, 'month').startOf('month')
     const beforePreviousMonthEnd = dayjs.utc().subtract(2, 'month').endOf('month')
-    const matchSelector = {
-      $match: {
-        projectId: { $in: projectList },
-      },
-    }
+    const totalMatch = { projectId: { $in: projectList } }
     if (period && period !== 'all') {
-      const {startDate, endDate} = await periodToDates(period)
-      matchSelector.$match.date = { $gte: startDate, $lte: endDate }
+      const { startDate, endDate } = await boundedPeriodRange(period, 'Project statistics period')
+      totalMatch.date = { $gte: startDate, $lte: endDate }
     }
-    const timecardAggregation = await Timecards.rawCollection().aggregate([matchSelector, { $group: { _id: null, totalHours: { $sum: '$hours' } } }]).toArray()
-    totalHours = Number.parseFloat(timecardAggregation[0]?.totalHours)
-    for (const timecard of
-      await Timecards.find({
-        projectId: { $in: projectList },
-        date: { $gte: beforePreviousMonthStart.toDate() },
-      }).fetchAsync()) {
-      if (dayjs.utc(new Date(timecard.date)).isBetween(currentMonthStart, currentMonthEnd, null, '[]')) {
-        currentMonthHours += Number.parseFloat(timecard.hours)
-      } else if (dayjs.utc(new Date(timecard.date))
-        .isBetween(previousMonthStart, previousMonthEnd, null, '[]')) {
-        previousMonthHours += Number.parseFloat(timecard.hours)
-      } else if (dayjs.utc(new Date(timecard.date))
-        .isBetween(beforePreviousMonthStart, beforePreviousMonthEnd, null, '[]')) {
-        beforePreviousMonthHours += Number.parseFloat(timecard.hours)
-      }
-    }
+    const totalHours = projectList.length === 0 ? 0 : await aggregateProjectMethodScalar({
+      aggregate: aggregateTimecards,
+      pipeline: [
+        { $match: totalMatch },
+        { $group: { _id: null, value: { $sum: '$hours' } } },
+      ],
+      label: 'Project total hours',
+    })
+    const monthTotals = projectList.length === 0 ? {
+      currentMonthHours: 0,
+      previousMonthHours: 0,
+      beforePreviousMonthHours: 0,
+    } : await aggregateProjectMonthTotals({
+      aggregate: aggregateTimecards,
+      projectIds: projectList,
+      currentMonthStart: currentMonthStart.toDate(),
+      currentMonthEnd: currentMonthEnd.toDate(),
+      previousMonthStart: previousMonthStart.toDate(),
+      previousMonthEnd: previousMonthEnd.toDate(),
+      beforePreviousMonthStart: beforePreviousMonthStart.toDate(),
+      beforePreviousMonthEnd: beforePreviousMonthEnd.toDate(),
+    })
     return {
       totalHours,
       currentMonthName,
-      currentMonthHours,
+      currentMonthHours: monthTotals.currentMonthHours,
       previousMonthName,
-      previousMonthHours,
+      previousMonthHours: monthTotals.previousMonthHours,
       beforePreviousMonthName,
-      beforePreviousMonthHours,
+      beforePreviousMonthHours: monthTotals.beforePreviousMonthHours,
     }
   },
 })
@@ -102,34 +193,20 @@ const getProjectUsers = new ValidatedMethod({
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({ projectId }) {
-    const data = []
     const project = await Projects.findOneAsync({ _id: projectId })
-    if (project?.public) {
-      for (const user of Meteor.users.find({})) {
-        if (user.inactive !== true) {
-          data.push({ _id: user._id, profile: user.profile })
-        }
-      }
-    } else if (project?.team || project?.admins) {
-      let team = []
-      if (project.team) {
-        team = team.concat(project.team)
-      }
-      if (project.admins) {
-        team = team.concat(project.admins)
-      }
-      if (team.indexOf(project.userId) === -1) {
-        team.push(project.userId)
-      }
-      team = team.filter((value, index, self) => self.indexOf(value) === index)
-      await Promise.all(team.map(async (member) => {
-        const user = await Meteor.users.findOneAsync({ _id: member })
-        if (user && user.inactive !== true) {
-          data.push({ _id: user._id, profile: user.profile })
-        }
-      }))
-    }
-    return data
+    if (!canViewProjectUnderPolicy(
+      project, this.userId, await currentPublicProjectsDisabled(),
+    )) throw new Meteor.Error('not-authorized')
+    const selector = userSelectorForProjectAudience(project, this.userId)
+    if (!selector) throw new Meteor.Error('not-authorized')
+    const users = await fetchBoundedProjectMethodRows({
+      find: (query, options) => Meteor.users.find(query, options).fetchAsync(),
+      selector,
+      fields: { 'profile.name': 1 },
+      sort: { 'profile.name': 1, _id: 1 },
+      label: 'Project users',
+    })
+    return users.map(publicNameOnlyUser).filter(Boolean)
   },
 })
 /**
@@ -153,15 +230,35 @@ const updateProject = new ValidatedMethod({
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({ projectId, projectArray }) {
-    const updateJSON = {}
+    let updateJSON = {}
     for (const projectAttribute of projectArray) {
+      if (!projectAttribute || !validProjectMutationField(projectAttribute.name)) {
+        throw new Meteor.Error('not-authorized')
+      }
       updateJSON[projectAttribute.name] = projectAttribute.value
     }
-    updateJSON.name = await emojify(updateJSON.name)
-    if (!updateJSON.public) {
-      updateJSON.public = false
-    } else {
-      updateJSON.public = true
+    try {
+      updateJSON = protectWekanCredential(normalizeWekanProjectFields(updateJSON))
+    } catch {
+      throw new Meteor.Error('project-integration-invalid', 'Invalid project integration settings.')
+    }
+    if (!Object.prototype.hasOwnProperty.call(updateJSON, 'name')) {
+      throw new Meteor.Error('project-invalid', 'Project name is required.')
+    }
+    try {
+      Object.assign(updateJSON, normalizeProjectPresentationFields(updateJSON))
+      updateJSON.name = await emojify(updateJSON.name)
+      Object.assign(updateJSON, normalizeProjectPresentationFields(updateJSON))
+    } catch (error) {
+      rethrowProjectPresentationValidation(error)
+    }
+    try {
+      updateJSON.public = assertPublicProjectValueAllowed(
+        updateJSON.public, await currentPublicProjectsDisabled(),
+      )
+    } catch (error) {
+      if (error instanceof PublicProjectPolicyError) throw new Meteor.Error(error.code)
+      throw error
     }
     if (!updateJSON.notbillable) {
       updateJSON.notbillable = false
@@ -177,7 +274,7 @@ const updateProject = new ValidatedMethod({
     await Projects.updateAsync({
       $or: [{ userId: this.userId }, { admins: { $in: [this.userId] } }],
       _id: projectId,
-    }, { $set: updateJSON })
+    }, projectMutationModifier({ $set: updateJSON }))
   },
 })
 /**
@@ -197,14 +294,28 @@ const createProject = new ValidatedMethod({
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({ projectArray }) {
-    const updateJSON = {}
+    let updateJSON = {}
     for (const projectAttribute of projectArray) {
+      if (!projectAttribute || !validProjectMutationField(projectAttribute.name)) {
+        throw new Meteor.Error('not-authorized')
+      }
       updateJSON[projectAttribute.name] = projectAttribute.value
     }
-    if (!updateJSON.public) {
-      updateJSON.public = false
-    } else {
-      updateJSON.public = true
+    try {
+      updateJSON = protectWekanCredential(normalizeWekanProjectFields(updateJSON))
+    } catch {
+      throw new Meteor.Error('project-integration-invalid', 'Invalid project integration settings.')
+    }
+    if (!Object.prototype.hasOwnProperty.call(updateJSON, 'name')) {
+      throw new Meteor.Error('project-invalid', 'Project name is required.')
+    }
+    try {
+      updateJSON.public = assertPublicProjectValueAllowed(
+        updateJSON.public, await currentPublicProjectsDisabled(),
+      )
+    } catch (error) {
+      if (error instanceof PublicProjectPolicyError) throw new Meteor.Error(error.code)
+      throw error
     }
     if(updateJSON.startDate) {
       updateJSON.startDate = new Date(updateJSON.startDate)
@@ -212,7 +323,13 @@ const createProject = new ValidatedMethod({
     if(updateJSON.endDate) {
       updateJSON.endDate = new Date(updateJSON.endDate)
     }
-    updateJSON.name = await emojify(updateJSON.name)
+    try {
+      Object.assign(updateJSON, normalizeProjectPresentationFields(updateJSON))
+      updateJSON.name = await emojify(updateJSON.name)
+      Object.assign(updateJSON, normalizeProjectPresentationFields(updateJSON))
+    } catch (error) {
+      rethrowProjectPresentationValidation(error)
+    }
     updateJSON._id = Random.id()
     updateJSON.userId = this.userId
     await Projects.insertAsync(updateJSON)
@@ -237,8 +354,8 @@ const deleteProject = new ValidatedMethod({
   mixins: [authenticationMixin, transactionLogMixin],
   async run({ projectId }) {
     await Projects.removeAsync({
-      $or: [{ userId: this.userId }, { admins: { $in: [this.userId] } }],
       _id: projectId,
+      $or: [{ userId: this.userId }, { admins: { $in: [this.userId] } }],
     })
     return true
   },
@@ -265,7 +382,7 @@ const archiveProject = new ValidatedMethod({
         _id: projectId,
         $or: [{ userId: this.userId }, { admins: { $in: [this.userId] } }],
       },
-      { $set: { archived: true } },
+      projectMutationModifier({ $set: { archived: true } }),
     )
     return true
   },
@@ -292,7 +409,7 @@ const restoreProject = new ValidatedMethod({
         _id: projectId,
         $or: [{ userId: this.userId }, { admins: { $in: [this.userId] } }],
       },
-      { $set: { archived: false } },
+      projectMutationModifier({ $set: { archived: false } }),
     )
     return true
   },
@@ -308,24 +425,34 @@ const getTopTasks = new ValidatedMethod({
   },
   mixins: [authenticationMixin],
   async run({ projectId, includeNotBillableTime, showArchived }) {
-    const rawCollection = Timecards.rawCollection()
+    let timecardSelector
     if (projectId === 'all') {
       const notbillable = includeNotBillableTime
-      const andCondition = [{
-        $or: [{ userId: this.userId }, { public: true }, { team: this.userId }],
-      }]
+      const andCondition = [{ $or: await currentProjectAudienceClauses(this.userId) }]
       if (!showArchived) {
         andCondition.push({ $or: [{ archived: false }, { archived: { $exists: false } }] })
       }
       if (!notbillable) {
         andCondition.push({ $or: [{ notbillable }, { notbillable: { $exists: false } }] })
       }
-      let projectList = await Projects.find({ $and: andCondition }, { _id: 1 })
-        .fetchAsync()
-      projectList = projectList.map((value) => value._id)
-      return rawCollection.aggregate([{ $match: { projectId: { $in: projectList } } }, { $group: { _id: '$task', count: { $sum: '$hours' } } }, { $sort: { count: -1 } }, { $limit: 3 }]).toArray()
+      const projectList = await boundedVisibleProjectIds({ $and: andCondition })
+      if (projectList.length === 0) return []
+      timecardSelector = { projectId: { $in: projectList } }
+    } else {
+      await assertProjectVisible(projectId, this.userId)
+      timecardSelector = { projectId }
     }
-    return rawCollection.aggregate([{ $match: { projectId } }, { $group: { _id: '$task', count: { $sum: '$hours' } } }, { $sort: { count: -1 } }, { $limit: 3 }]).toArray()
+    return aggregateBoundedProjectMethodRows({
+      aggregate: aggregateTimecards,
+      pipeline: [
+        { $match: timecardSelector },
+        { $group: { _id: '$task', count: { $sum: '$hours' } } },
+        { $sort: { count: -1, _id: 1 } },
+        { $limit: TOP_TASK_RESULT_LIMIT },
+      ],
+      label: 'Top tasks',
+      maxResults: TOP_TASK_RESULT_LIMIT,
+    })
   },
 })
 
@@ -341,40 +468,48 @@ const getProjectDistribution = new ValidatedMethod({
   },
   mixins: [authenticationMixin],
   async run({ projectId, includeNotBillableTime, showArchived, period }) {
-    const rawCollection = Timecards.rawCollection()
+    let timecardSelector
+    let maxResults
     if (projectId === 'all') {
       const notbillable = includeNotBillableTime
-      const andCondition = [{
-        $or: [{ userId: this.userId }, { public: true }, { team: this.userId }],
-      }]
+      const andCondition = [{ $or: await currentProjectAudienceClauses(this.userId) }]
       if (!showArchived) {
         andCondition.push({ $or: [{ archived: false }, { archived: { $exists: false } }] })
       }
       if (!notbillable) {
         andCondition.push({ $or: [{ notbillable }, { notbillable: { $exists: false } }] })
       }
-      let projectList = await Projects.find({ $and: andCondition }, { _id: 1 })
-        .fetchAsync()
-      projectList = projectList.map((value) => value._id)
-      const matchSelector = {
-        $match: {
-          projectId: { $in: projectList },
-        },
-      }
+      const projectList = await boundedVisibleProjectIds({ $and: andCondition })
+      if (projectList.length === 0) return []
+      timecardSelector = { projectId: { $in: projectList } }
+      maxResults = MAX_PROJECT_SCOPE_IDS
       if (period && period !== 'all') {
-        const { startDate, endDate } = await periodToDates(period)
-        matchSelector.$match.date = { $gte: startDate, $lte: endDate }
+        const { startDate, endDate } = await boundedPeriodRange(
+          period, 'Project distribution period',
+        )
+        timecardSelector.date = { $gte: startDate, $lte: endDate }
       }
-      return rawCollection.aggregate([matchSelector, { $group: { _id: '$projectId', count: { $sum: '$hours' } } }, { $sort: { projectId: 1 } }]).toArray()
+    } else {
+      await assertProjectVisible(projectId, this.userId)
+      timecardSelector = { projectId }
+      maxResults = 1
+      if (period && period !== 'all') {
+        const { startDate, endDate } = await boundedPeriodRange(
+          period, 'Project distribution period',
+        )
+        timecardSelector.date = { $gte: startDate, $lte: endDate }
+      }
     }
-    const matchSelector = {
-      $match: { projectId },
-    }
-    if (period) {
-      const { startDate, endDate } = await periodToDates(period)
-      matchSelector.$match.date = { $gte: startDate, $lte: endDate }
-    }
-    return rawCollection.aggregate([matchSelector, { $group: { _id: '$projectId', count: { $sum: '$hours' } } }, { $sort: { projectId: 1 } }]).toArray()
+    return aggregateBoundedProjectMethodRows({
+      aggregate: aggregateTimecards,
+      pipeline: [
+        { $match: timecardSelector },
+        { $group: { _id: '$projectId', count: { $sum: '$hours' } } },
+        { $sort: { _id: 1 } },
+      ],
+      label: 'Project distribution',
+      maxResults,
+    })
   },
 })
 /**
@@ -404,8 +539,13 @@ const addTeamMember = new ValidatedMethod({
     }
     const targetUser = await Meteor.users.findOneAsync({ 'emails.0.address': eMail, inactive: { $ne: true } })
     if (targetUser) {
-      await Projects
-        .updateAsync({ _id: targetProject._id }, { $addToSet: { team: targetUser._id } })
+      const result = await Projects.rawCollection().updateOne(
+        projectAdministratorMutationSelector(targetProject._id, this.userId),
+        projectMutationModifier({ $addToSet: { team: targetUser._id } }),
+      )
+      if (!projectMutationMatched(result)) {
+        throw new Meteor.Error('notifications.only_owner_can_add_team_members')
+      }
       await addNotification(`You have been invited to collaborate on the titra project '${targetProject.name}'`, targetUser._id)
       return 'notifications.team_member_added_success'
     }
@@ -434,11 +574,16 @@ const removeTeamMember = new ValidatedMethod({
     const targetProject = await Projects.findOneAsync({ _id: projectId })
     if (!targetProject
       || !(targetProject.userId === this.userId
-        || targetProject.admins.indexOf(this.userId) >= 0)) {
+        || targetProject.admins?.indexOf(this.userId) >= 0)) {
       throw new Meteor.Error('notifications.only_owner_can_remove_team_members')
     }
-    await Projects.updateAsync({ _id: targetProject._id }, { $pull: { team: userId } })
-    await Projects.updateAsync({ _id: targetProject._id }, { $pull: { admins: userId } })
+    const result = await Projects.rawCollection().updateOne(
+      projectAdministratorMutationSelector(targetProject._id, this.userId),
+      projectMutationModifier({ $pull: { team: userId, admins: userId } }),
+    )
+    if (!projectMutationMatched(result)) {
+      throw new Meteor.Error('notifications.only_owner_can_remove_team_members')
+    }
     return 'notifications.team_member_removed_success'
   },
 })
@@ -466,13 +611,18 @@ const changeProjectRole = new ValidatedMethod({
     const targetProject = await Projects.findOneAsync({ _id: projectId })
     if (!targetProject
       || !(targetProject.userId === this.userId
-        || targetProject.admins.indexOf(this.userId) >= 0)) {
+        || targetProject.admins?.indexOf(this.userId) >= 0)) {
       throw new Meteor.Error('notifications.only_owner_can_remove_team_members')
     }
-    if (administrator) {
-      await Projects.updateAsync({ _id: targetProject._id }, { $push: { admins: userId } })
-    } else {
-      await Projects.updateAsync({ _id: targetProject._id }, { $pull: { admins: userId } })
+    const modifier = administrator
+      ? { $addToSet: { admins: userId } }
+      : { $pull: { admins: userId } }
+    const result = await Projects.rawCollection().updateOne(
+      projectAdministratorMutationSelector(targetProject._id, this.userId),
+      projectMutationModifier(modifier),
+    )
+    if (!projectMutationMatched(result)) {
+      throw new Meteor.Error('notifications.only_owner_can_remove_team_members')
     }
     return 'notifications.access_rights_updated'
   },
@@ -501,7 +651,7 @@ const updatePriority = new ValidatedMethod({
         _id: projectId,
         $or: [{ userId: this.userId }, { admins: { $in: [this.userId] } }],
       },
-      { $set: { priority } },
+      projectMutationModifier({ $set: { priority } }),
     )
     return 'notifications.project_priority_success'
   },
@@ -532,18 +682,20 @@ const setDefaultTaskForProject = new ValidatedMethod({
     if (!project) {
       throw new Meteor.Error('notifications.project_not_found')
     }
-    const task = await Tasks.findOneAsync({ _id: taskId })
-    if (!task || task.projectId !== projectId) {
-      throw new Meteor.Error('notifications.task_not_found')
-    }
+    const task = await Tasks.findOneAsync({ _id: taskId, projectId })
+    if (!task) throw new Meteor.Error('notifications.task_not_found')
     if (task.isDefaultTask) {
       await Projects.updateAsync({ _id: projectId }, { $unset: { defaultTask: 1 } })
-      await Tasks.updateAsync({ _id: taskId }, { $set: { isDefaultTask: false } })
+      await Tasks.updateAsync({ _id: taskId, projectId }, { $set: { isDefaultTask: false } })
       return 'notifications.default_task_success'
     }
     await Projects.updateAsync({ _id: projectId }, { $set: { defaultTask: task.name } })
-    await Tasks.updateAsync({ projectId }, { $set: { isDefaultTask: false } }, { multi: true })
-    await Tasks.updateAsync({ _id: taskId }, { $set: { isDefaultTask: true } })
+    await Tasks.updateAsync(
+      { projectId, isDefaultTask: true, _id: { $ne: taskId } },
+      { $set: { isDefaultTask: false } },
+      { multi: true },
+    )
+    await Tasks.updateAsync({ _id: taskId, projectId }, { $set: { isDefaultTask: true } })
     return 'notifications.default_task_success'
   },
 })
@@ -569,20 +721,18 @@ const setRateForUser = new ValidatedMethod({
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({ projectId, userId, rate }) {
-    const project = await Projects.findOneAsync({
-      _id: projectId,
-      $or: [{ userId: this.userId }, { admins: { $in: [this.userId] } }],
-    })
-    if (!project) {
+    let modifier
+    try {
+      modifier = projectRateModifier(userId, rate)
+    } catch (error) {
       throw new Meteor.Error('notifications.project_not_found')
     }
-    const rates = project.rates || {}
-    const rateId = JSON.parse(`{ "rates.${userId}": 1}`)
-    if (parseFloat(rate) > 0) {
-      rates[userId] = rate
-      await Projects.updateAsync({ _id: projectId }, { $set: { rates } })
-    } else {
-      await Projects.updateAsync({ _id: projectId }, { $unset: rateId })
+    const result = await Projects.rawCollection().updateOne(
+      projectAdministratorMutationSelector(projectId, this.userId),
+      projectMutationModifier(modifier),
+    )
+    if (!projectMutationMatched(result)) {
+      throw new Meteor.Error('notifications.project_not_found')
     }
     return 'notifications.rate_success'
   },
@@ -605,17 +755,22 @@ const searchForProject = new ValidatedMethod({
   },
   mixins: [authenticationMixin],
   async run({ query }) {
-    const projects = await Projects.find({
-      $and: [
-        {
-          $or: [{ userId: this.userId }, { public: true }, { team: this.userId }],
-        },
-        { $or: [{ archived: false }, { archived: { $exists: false } }] },
-      ],
-    }).fetchAsync()
-    projects.map((entry) => ({ ...entry, score: calculateSimilarity(entry.name, query) }))
-    projects.sort((a, b) => b.score - a.score)
-    return projects.length > 0 ? projects[0]._id : null
+    if (query.length > MAX_RESOURCE_SCOPE_TEXT * 2
+      || !query.isWellFormed() || [...query].length > MAX_RESOURCE_SCOPE_TEXT) {
+      throw new Meteor.Error('project-search-invalid')
+    }
+    const projects = await fetchBoundedProjectMethodRows({
+      find: (selector, options) => Projects.find(selector, options).fetchAsync(),
+      selector: {
+        $and: [
+          { $or: await currentProjectAudienceClauses(this.userId) },
+          { $or: [{ archived: false }, { archived: { $exists: false } }] },
+        ],
+      },
+      fields: { _id: 1, name: 1 },
+      label: 'Project search',
+    })
+    return bestProjectMatch(projects, query, calculateSimilarity)
   },
 })
 

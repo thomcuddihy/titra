@@ -14,15 +14,20 @@
                     <div class="row">
                     <div class="col-lg-2">
                     <span class="d-block">{{t "settings.current"}}</span>
-                    {{#if currentUser.profile.avatar}}
-                        <img id="avatar" src="{{currentUser.profile.avatar}}" alt='{{t "settings.avatar"}}' class="img-responsive"/>
+                    {{#with profileAvatar}}
+                      {{#if url}}
+                        <img id="avatar" src="{{url}}" alt="{{name}}" class="img-responsive rounded" height="100" width="100"/>
                         <button type="button" class="btn btn-secondary d-block" id="removeAvatar">{{t "settings.reset"}}</button>
-                    {{else}}
-                        {{{svgAvatar}}}
-                    {{/if}}
+                      {{else}}
+                        <button type="button" class="js-avatar-picker border-0 bg-transparent p-0" title="{{name}}">
+                          <span class="rounded d-inline-flex align-items-center justify-content-center text-white"
+                            style="height:100px;width:100px;background-color:{{color}};font-size:2rem;">{{initials}}</span>
+                        </button>
+                      {{/if}}
+                    {{/with}}
                     </div>
                     <div class="col-lg-3">
-                        {{#unless currentUser.profile.avatar}}
+                        {{#unless hasCustomAvatar}}
                         <div class="mb-3">
                             <div class="form-floating">
                                 <input aria-label='{{t "globals.color"}}' name="avatarColor" id="avatarColor" type="color" value="{{avatarColor}}" class="form-control" />
@@ -37,7 +42,7 @@
                         <input type="hidden" name="avatarData" id="avatarData" value="{{currentUser.profile.avatarData}}"/>
                     </div>
                     <div class="col-lg-3">
-                        {{#unless currentUser.profile.avatar}}
+                        {{#unless hasCustomAvatar}}
                         <div id="imagePreview" style="display:none;">
                         <p>{{t "settings.preview"}}:</p>
                         <img class="img-responsive img-thumbnail" style="max-height:200px;" alt="avatar upload preview"/>

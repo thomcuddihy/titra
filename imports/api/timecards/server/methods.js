@@ -1,8 +1,11 @@
 import { ValidatedMethod } from 'meteor/mdg:validated-method'
+import { DDPRateLimiter } from 'meteor/ddp-rate-limiter'
+import { OAuth } from 'meteor/oauth'
 import dayjs from 'dayjs'
 import { fetch } from 'meteor/fetch'
 import { check, Match } from 'meteor/check'
 import { NodeVM } from '../../../utils/vm_sandbox.js'
+import { legacyScriptDecision } from '../../../utils/legacyScriptPolicy.js'
 import Timecards from '../timecards.js'
 import Tasks from '../../tasks/tasks.js'
 import Projects from '../../projects/projects.js'
@@ -22,6 +25,23 @@ import {
   calculateSimilarity,
 } from '../../../utils/server_method_helpers.js'
 import { getOpenAIResponse } from '../../../utils/openai/openai_server.js'
+import {
+  evaluateTimeEntryRule,
+  timeEntryRuleInternalError,
+} from './timeEntryRuleOutcome.js'
+import { canRegisterTime, runAuthorizedTimecardCreateRule } from './createAuthorization.js'
+import {
+  MAX_BULK_TIMECARD_ENTRIES,
+  MAX_WEEK_MUTATION_ENTRIES,
+  assertTimecardMutationBatch,
+  assertTimecardMutationInput,
+} from './mutationInput.js'
+import { sendSiwappInvoice } from '../../users/server/taskIntegrationProxy.js'
+import {
+  MAX_TIMECARD_PUBLICATION_RECORDS,
+  RESOURCE_QUERY_MAX_TIME_MS,
+  assertResultWithinLimit,
+} from '../../../utils/resourceLimits.js'
 
 const timeEntryForbiddenCustomfieldKeys = new Set([
   '_id', 'userId', 'projectId', 'date', 'hours', 'task', 'taskRate', 'state', 'lastUsed', 'name', 'createdAt', 'updatedAt',
@@ -48,30 +68,47 @@ async function checkTimeEntryRule({
   userId, projectId, task, state, date, hours,
 }) {
   const meteorUser = await Meteor.users.findOneAsync({ _id: userId })
-  const vm = new NodeVM({
-    wrapper: 'none',
-    timeout: 1000,
-    console: 'inherit', // Enable console logging for testing
-    sandbox: {
-      user: meteorUser.profile,
-      project: await Projects.findOneAsync({ _id: projectId }),
-      dayjs,
-      timecard: {
-        projectId,
-        task,
-        state,
-        date,
-        hours,
-      },
-    },
-  })
-  try {
-    if (!await vm.run(await getGlobalSettingAsync('timeEntryRule'))) {
-      throw new Meteor.Error('notifications.time_entry_rule_failed')
-    }
-  } catch (error) {
-    throw new Meteor.Error(error.message)
+  const project = await Projects.findOneAsync({ _id: projectId })
+  const rule = await getGlobalSettingAsync('timeEntryRule')
+  if (!meteorUser || !project) throw timeEntryRuleInternalError()
+  const scriptPolicy = legacyScriptDecision('time-entry-rule', rule)
+  if (!scriptPolicy.allowed) {
+    throw new Meteor.Error(
+      'unsafe-legacy-script-disabled',
+      'The configured JavaScript time-entry rule is disabled by the server security policy.',
+    )
   }
+  if (!scriptPolicy.execute) {
+    await evaluateTimeEntryRule(rule, async () => scriptPolicy.literalResult)
+    return
+  }
+  let vm
+  try {
+    vm = new NodeVM({
+      wrapper: 'none',
+      timeout: 1000,
+      sandbox: {
+        user: meteorUser.profile,
+        project,
+        dayjs,
+        timecard: { projectId, task, state, date, hours },
+      },
+    })
+  } catch (error) {
+    throw timeEntryRuleInternalError()
+  }
+  await evaluateTimeEntryRule(rule, (source) => vm.run(source))
+}
+
+function checkAuthorizedTimeEntryRule(ruleInput) {
+  return runAuthorizedTimecardCreateRule({
+    projectId: ruleInput.projectId,
+    userId: ruleInput.userId,
+    ruleInput,
+  }, {
+    findProject: (selector) => Projects.findOneAsync(selector),
+    checkRule: checkTimeEntryRule,
+  })
 }
 /**
  * Inserts a new timecard into the Timecards collection.
@@ -182,19 +219,35 @@ async function checkProjectAdministratorAndUser(projectId, administratorId, user
   const targetProject = await Projects.findOneAsync({ _id: projectId })
   if (!targetProject
       || !(targetProject.userId === administratorId
-      || targetProject.admins.indexOf(administratorId) >= 0)) {
+      || targetProject.admins?.includes(administratorId))) {
     throw new Meteor.Error('notifications.only_administrator_can_register_time')
   }
   const user = await Meteor.users.findOneAsync({ 'profile.name': userId })
   if (!user) {
     throw new Meteor.Error('notifications.user_not_found')
   }
-  if (targetProject.public !== true
-      && targetProject.userId !== user._id
-      && targetProject.team.indexOf(user._id) === -1) {
+  if (!canRegisterTime(targetProject, user._id)) {
     throw new Meteor.Error('notifications.user_not_found_in_project')
   }
   return user._id
+}
+
+async function resolveBulkTimecardUserId(projectId, requestedUserId, callerUserId) {
+  const targetProject = await Projects.findOneAsync({ _id: projectId })
+  const targetUserId = requestedUserId || callerUserId
+  if (targetUserId !== callerUserId) {
+    if (!(targetProject?.userId === callerUserId
+      || targetProject?.admins?.includes(callerUserId))) {
+      throw new Meteor.Error('notifications.only_administrator_can_register_time')
+    }
+    if (!await Meteor.users.findOneAsync({ _id: targetUserId, inactive: { $ne: true } })) {
+      throw new Meteor.Error('notifications.user_not_found')
+    }
+  }
+  if (!canRegisterTime(targetProject, targetUserId)) {
+    throw new Meteor.Error('notifications.user_not_found_in_project')
+  }
+  return targetUserId
 }
 /**
  * Inserts a new timecard into the Timecards collection.
@@ -219,6 +272,7 @@ const insertTimeCardMethod = new ValidatedMethod({
     check(args.taskRate, Match.Maybe(Number))
     check(args.customfields, Match.Maybe(Object))
     check(args.user, String)
+    assertTimecardMutationInput(args)
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({
@@ -228,10 +282,10 @@ const insertTimeCardMethod = new ValidatedMethod({
     if (user !== userId) {
       userId = await checkProjectAdministratorAndUser(projectId, userId, user)
     }
-    const check = await checkTimeEntryRule({
+    await checkAuthorizedTimeEntryRule({
       userId, projectId, task, state: 'new', date, hours,
     })
-    insertTimeCard(projectId, task, date, hours, userId, taskRate, customfields)
+    return insertTimeCard(projectId, task, date, hours, userId, taskRate, customfields)
   },
 })
 /**
@@ -252,15 +306,19 @@ const upsertWeek = new ValidatedMethod({
   name: 'upsertWeek',
   validate(args) {
     check(args, Array)
-  },
-  mixins: [authenticationMixin, transactionLogMixin],
-  async run(weekArray) {
-    weekArray.forEach(async (element) => {
+    assertTimecardMutationBatch(args, MAX_WEEK_MUTATION_ENTRIES)
+    args.forEach((element) => {
       check(element.projectId, String)
       check(element.task, String)
       check(element.date, Date)
       check(element.hours, Number)
-      await checkTimeEntryRule({
+      assertTimecardMutationInput(element)
+    })
+  },
+  mixins: [authenticationMixin, transactionLogMixin],
+  async run(weekArray) {
+    for (const element of weekArray) {
+      await checkAuthorizedTimeEntryRule({
         userId: this.userId,
         projectId: element.projectId,
         task: element.task,
@@ -275,7 +333,7 @@ const upsertWeek = new ValidatedMethod({
         element.hours,
         this.userId,
       )
-    })
+    }
   },
 })
 /**
@@ -304,22 +362,36 @@ const updateTimeCard = new ValidatedMethod({
     check(args.taskRate, Match.Maybe(Number))
     check(args.customfields, Match.Maybe(Object))
     check(args.user, String)
+    assertTimecardMutationInput(args)
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({
     projectId, _id, task, date, hours, taskRate, customfields, user,
   }) {
-    let { userId } = this
-    if (user !== userId) {
-      userId = await checkProjectAdministratorAndUser(projectId, userId, user)
+    const callerUserId = this.userId
+    let targetUserId = callerUserId
+    if (user !== callerUserId) {
+      targetUserId = await checkProjectAdministratorAndUser(projectId, callerUserId, user)
     }
-    const timecard = await Timecards.findOneAsync({ _id })
-    await checkTimeEntryRule({
-      userId, projectId, task, state: timecard.state, date, hours,
+    const timecard = await Timecards.findOneAsync({ _id, userId: targetUserId })
+    if (!timecard) throw new Meteor.Error('not-authorized')
+    if (targetUserId !== callerUserId && timecard.projectId !== projectId) {
+      const sourceProject = await Projects.findOneAsync({
+        _id: timecard.projectId,
+        $or: [{ userId: callerUserId }, { admins: { $in: [callerUserId] } }],
+      })
+      if (!sourceProject) {
+        throw new Meteor.Error('notifications.only_administrator_can_register_time')
+      }
+    }
+    await checkAuthorizedTimeEntryRule({
+      userId: targetUserId, projectId, task, state: timecard.state, date, hours,
     })
     const safeCustomfields = sanitizeObject(customfields, timeEntryForbiddenCustomfieldKeys)
-    if (!await Tasks.findOneAsync({ userId, name: await emojify(task) })) {
-      await Tasks.insertAsync({ ...safeCustomfields, userId, name: await emojify(task) })
+    if (!await Tasks.findOneAsync({ userId: targetUserId, name: await emojify(task) })) {
+      await Tasks.insertAsync({
+        ...safeCustomfields, userId: targetUserId, name: await emojify(task),
+      })
     }
     const fieldsToSet = {
       ...safeCustomfields,
@@ -330,11 +402,11 @@ const updateTimeCard = new ValidatedMethod({
     }
     if (taskRate) {
       fieldsToSet.taskRate = taskRate
-      await Timecards.updateAsync({ _id }, {
+      await Timecards.updateAsync({ _id, userId: targetUserId }, {
         $set: fieldsToSet,
       })
     } else {
-      await Timecards.updateAsync({ _id }, {
+      await Timecards.updateAsync({ _id, userId: targetUserId }, {
         $set: fieldsToSet,
         $unset: { taskRate: '' },
       })
@@ -360,7 +432,8 @@ const deleteTimeCard = new ValidatedMethod({
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({ timecardId }) {
-    const timecard = await Timecards.findOneAsync({ _id: timecardId })
+    const timecard = await Timecards.findOneAsync({ _id: timecardId, userId: this.userId })
+    if (!timecard) throw new Meteor.Error('not-authorized')
     await checkTimeEntryRule({
       userId: this.userId,
       projectId: timecard.projectId,
@@ -403,7 +476,7 @@ const sendToSiwapp = new ValidatedMethod({
     projectId, timePeriod, userId, customer, dates,
   }) {
     const meteorUser = await Meteor.users.findOneAsync({ _id: this.userId })
-    if (!meteorUser.profile.siwappurl || !meteorUser.profile.siwapptoken) {
+    if (!meteorUser?.profile?.siwappurl || !meteorUser.profile.siwapptoken) {
       throw new Meteor.Error(t('notifications.siwapp_configuration'))
     }
     const timeEntries = []
@@ -419,7 +492,18 @@ const sendToSiwapp = new ValidatedMethod({
       sort: undefined,
     })
     const projectMap = new Map()
-    for (const timecard of await Timecards.find(selector[0]).fetchAsync()) {
+    const selectedTimecards = await Timecards.rawCollection().find(selector[0], {
+      projection: { _id: 1, projectId: 1, hours: 1 },
+      sort: { _id: 1 },
+      limit: MAX_TIMECARD_PUBLICATION_RECORDS + 1,
+      maxTimeMS: RESOURCE_QUERY_MAX_TIME_MS,
+    }).toArray()
+    assertResultWithinLimit(
+      selectedTimecards,
+      MAX_TIMECARD_PUBLICATION_RECORDS,
+      'Invoice time-entry selection',
+    )
+    for (const timecard of selectedTimecards) {
       timeEntries.push(timecard._id)
       const resource = meteorUser.profile.name
       const projectEntry = projectMap.get(timecard.projectId)
@@ -461,24 +545,29 @@ const sendToSiwapp = new ValidatedMethod({
       }
     }
     try {
-      const response = await fetch(`${meteorUser.profile.siwappurl}/api/v1/invoices`, {
-        method: 'POST',
-        body: JSON.stringify(invoiceJSON),
-        headers: {
-          Authorization: `Token token=${meteorUser.profile.siwapptoken}`,
-          'Content-type': 'application/json',
+      await sendSiwappInvoice({
+        profile: {
+          ...meteorUser.profile,
+          siwapptoken: OAuth.openSecret(meteorUser.profile.siwapptoken),
         },
+        invoice: invoiceJSON,
       })
-      if (response.status === 201) {
-        await Timecards.updateAsync({ _id: { $in: timeEntries } }, { $set: { state: 'billed' } }, { multi: true })
-        return 'notifications.siwapp_success'
-      }
-      return response.statusText
-    } catch (error) {
-      throw new Meteor.Error(error)
+    } catch {
+      throw new Meteor.Error('siwapp-unavailable', 'The invoice service is unavailable.')
     }
+    await Timecards.updateAsync(
+      { _id: { $in: timeEntries } },
+      { $set: { state: 'billed' } },
+      { multi: true },
+    )
+    return 'notifications.siwapp_success'
   },
 })
+DDPRateLimiter.addRule({
+  type: 'method',
+  name: 'sendToSiwapp',
+  userId(userId) { return typeof userId === 'string' && userId.length > 0 },
+}, 5, 60 * 1000)
 /**
  * Gets the daily timecards sum for a given period.
  * @param {Object} args - The arguments object containing the timecard information.
@@ -1004,6 +1093,7 @@ const bulkInsertTimecards = new ValidatedMethod({
     check(args, {
       timecards: Array,
     })
+    assertTimecardMutationBatch(args.timecards, MAX_BULK_TIMECARD_ENTRIES)
     args.timecards.forEach((timecard) => {
       check(timecard, {
         projectId: String,
@@ -1013,19 +1103,20 @@ const bulkInsertTimecards = new ValidatedMethod({
         userId: Match.Maybe(String), // Optional userId
         customfields: Match.Maybe(Object), // Optional custom fields
       })
+      assertTimecardMutationInput(timecard)
     })
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({ timecards }) {
     const insertedTimecards = []
     for (const timecard of timecards) {
-      const userId = timecard.userId || this.userId
-      // Use provided userId or fallback to the current user
       const {
         projectId, task, date, hours, customfields,
       } = timecard
-      // Check time entry rules
-      await checkTimeEntryRule({
+      const userId = await resolveBulkTimecardUserId(
+        projectId, timecard.userId, this.userId,
+      )
+      await checkAuthorizedTimeEntryRule({
         userId,
         projectId,
         task,

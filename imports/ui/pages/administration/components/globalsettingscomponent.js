@@ -30,8 +30,12 @@ Template.globalsettingscomponent.helpers({
   globalsettingCategories: () => Template.instance().globalsettingCategories.get()?.map((entry) => entry || 'settings.categories.no_category'),
   isTextArea: (setting) => setting.type === 'textarea',
   isCheckbox: (setting) => setting.type === 'checkbox',
-  isChecked: (setting) => (setting.value.toString() === 'true' ? 'checked' : ''),
-  stringify: (string) => string?.toString(),
+  isChecked: (setting) => (setting.value?.toString() === 'true' ? 'checked' : ''),
+  isWriteOnly: (setting) => Object.hasOwn(setting, 'configured'),
+  inputType: (setting) => (Object.hasOwn(setting, 'configured') ? 'password' : setting.type),
+  inputAutocomplete: (setting) => (Object.hasOwn(setting, 'configured') ? 'new-password' : ''),
+  editableValue: (setting) => (Object.hasOwn(setting, 'configured') ? '' : setting.value),
+  writeOnlyPlaceholder: (setting) => (setting.configured ? '••••••••' : ''),
 })
 
 Template.globalsettingscomponent.events({
@@ -85,6 +89,9 @@ Template.globalsettingscomponent.events({
         showToast(error.reason)
         console.error(error)
       } else {
+        // The server treats blank secret inputs as "preserve existing". Never
+        // leave a newly submitted credential in the DOM after the request.
+        templateInstance.$('.js-write-only-setting').val('')
         showToast(t('notifications.settings_saved_success'))
       }
     })

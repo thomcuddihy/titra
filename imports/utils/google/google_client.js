@@ -1,7 +1,5 @@
 import { OAuth } from 'meteor/oauth'
-import { Random } from 'meteor/random'
 import { ServiceConfiguration } from 'meteor/service-configuration'
-import { Base64 } from 'meteor/base64'
 
 const hasOwn = Object.prototype.hasOwnProperty
 
@@ -18,7 +16,7 @@ const ILLEGAL_PARAMETERS = {
 // @param credentialRequestCompleteCallback {Function} Callback function to call on
 //   completion. Takes one argument, credentialToken on success, or Error on
 //   error.
-const requestCredential = async (optionsParam) => new Promise((resolve, reject) => {
+const requestCredential = async (optionsParam) => {
   // support both (options, callback) and (callback).
   let options = optionsParam
   if (!options) {
@@ -28,11 +26,8 @@ const requestCredential = async (optionsParam) => new Promise((resolve, reject) 
   }
   const config = ServiceConfiguration.configurations.findOne({ service: 'googleapi' })
   if (!config) {
-    reject(new ServiceConfiguration.ConfigError())
-    return
+    throw new ServiceConfiguration.ConfigError()
   }
-
-  const credentialToken = Random.secret()
 
   const scopes = ['https://www.googleapis.com/auth/calendar.events.readonly', 'https://www.googleapis.com/auth/gmail.readonly']
 
@@ -66,25 +61,13 @@ const requestCredential = async (optionsParam) => new Promise((resolve, reject) 
   }
 
   const loginStyle = OAuth._loginStyle('googleapi', config, options)
+  // The server creates a short-lived, one-use binding between this opaque
+  // Meteor OAuth credential token and the currently authenticated user. The
+  // HTTP callback must never trust a user identity supplied in OAuth state.
+  const credentialToken = await Meteor.callAsync('googleapi.beginAuthorization')
   // https://developers.google.com/accounts/docs/OAuth2WebServer#formingtheurl
 
-  const state = {
-    loginStyle,
-    credentialToken,
-    isCordova: Meteor.isCordova,
-    userId: Meteor.userId(),
-  }
-
-  if (loginStyle === 'redirect'
-      || (Meteor.settings?.public?.packages?.oauth?.setRedirectUrlWhenLoginStyleIsPopup && loginStyle === 'popup')
-  ) {
-    state.redirectUrl = options.redirectUrl || (`${window.location}`)
-  }
-
-  // Encode base64 as not all login services URI-encode the state
-  // parameter when they pass it back to us.
-  // Use the 'base64' package here because 'btoa' isn't supported in IE8/9.
-  const encodedState = Base64.encode(JSON.stringify(state))
+  const encodedState = OAuth._stateParam(loginStyle, credentialToken, options.redirectUrl)
   Object.assign(loginUrlParameters, {
     response_type: 'code',
     client_id: config.clientId,
@@ -95,17 +78,19 @@ const requestCredential = async (optionsParam) => new Promise((resolve, reject) 
   const loginUrl = `https://accounts.google.com/o/oauth2/auth?${
     Object.keys(loginUrlParameters).map((param) => `${encodeURIComponent(param)}=${encodeURIComponent(loginUrlParameters[param])}`).join('&')}`
 
-  OAuth.launchLogin({
-    loginService: 'googleapi',
-    loginStyle,
-    loginUrl,
-    credentialRequestCompleteCallback: (credentialTokenParam) => {
-      resolve(credentialTokenParam)
-    },
-    credentialToken,
-    popupOptions: { height: 600 },
+  return new Promise((resolve) => {
+    OAuth.launchLogin({
+      loginService: 'googleapi',
+      loginStyle,
+      loginUrl,
+      credentialRequestCompleteCallback: (credentialTokenParam) => {
+        resolve(credentialTokenParam)
+      },
+      credentialToken,
+      popupOptions: { height: 600 },
+    })
   })
-})
+}
 
 const googleAPI = async (optionsParam) => {
   const options = optionsParam

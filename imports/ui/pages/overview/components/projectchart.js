@@ -1,14 +1,17 @@
-import namedavatar from 'namedavatar'
 import './projectchart.html'
 import Projects, { ProjectStats } from '../../../../api/projects/projects.js'
 import { projectUsers } from '../../../../api/users/users.js'
 import { getUserSetting, getUserTimeUnitVerbose, getGlobalSetting } from '../../../../utils/frontend_helpers'
 import dayjs from 'dayjs'
 import utc from 'dayjs/plugin/utc'
+import {
+  avatarPresentation,
+  projectDescriptionText,
+} from '../../../../utils/userContentSecurity.js'
 
 Template.projectchart.onCreated(function projectchartCreated() {
   this.topTasks = new ReactiveVar()
-  this.projectDescAsHtml = new ReactiveVar()
+  this.projectDescription = new ReactiveVar('')
   this.isVisible = new ReactiveVar(false)
 
   dayjs.extend(utc)
@@ -27,35 +30,19 @@ Template.projectchart.helpers({
   hourIndicator() {
     const stats = ProjectStats.findOne({ _id: Template.instance().data.projectId })
     if (stats.previousMonthHours > stats.currentMonthHours) {
-      return '<i class="d-md-none fa fa-arrow-circle-up"></i>'
+      return 'fa-arrow-circle-up'
     }
     if (stats.previousMonthHours < stats.currentMonthHours) {
-      return '<i class="d-md-none fa fa-arrow-circle-down"></i>'
+      return 'fa-arrow-circle-down'
     }
-    return '<i class="d-md-none fa fa-minus-square"></i>'
+    return 'fa-minus-square'
   },
   allTeamMembers() {
     return projectUsers.findOne({ _id: Template.instance().data.projectId })
       ? projectUsers.findOne({ _id: Template.instance().data.projectId }).users : false
   },
-  avatarImg(avatar, name, avatarColor) {
-    if (avatar) {
-      return `<img src="${avatar}" alt="${name}" style="height:25px; cursor:pointer;" class="rounded" data-bs-placement="top" title="${name}"/>`
-    }
-    namedavatar.config({
-      nameType: 'initials',
-      backgroundColors: [avatarColor || '#455A64'],
-      minFontSize: 2,
-    })
-    const rawSVG = namedavatar.getSVG(name)
-    rawSVG.classList.add('rounded')
-    rawSVG.style.width = '25px'
-    rawSVG.style.height = '25px'
-    rawSVG.style.cursor = 'pointer'
-    rawSVG.dataset.bsPlacement = 'right'
-    rawSVG.dataset.bsToggle = 'tooltip'
-    rawSVG.setAttribute('title', name)
-    return rawSVG.outerHTML
+  avatar(avatar, name, avatarColor) {
+    return avatarPresentation({ profile: { avatar, name, avatarColor } })
   },
   topTasks() {
     return Template.instance().topTasks.get()
@@ -82,8 +69,7 @@ Template.projectchart.helpers({
   customer() {
     return Projects.findOne({ _id: Template.instance().data.projectId })?.customer
   },
-  projectDescAsHtml: () => encodeURI(Template.instance().projectDescAsHtml.get() ? Template.instance().projectDescAsHtml.get() : ''),
-  truncatedProjectDescAsHtml: () => (`<div class="ms-2">${Template.instance().projectDescAsHtml.get()}</div>`),
+  projectDescription: () => Template.instance().projectDescription.get(),
   componentIsReady() {
     return Template.instance().isVisible.get() && Template.instance().subscriptionsReady()
   },
@@ -101,11 +87,11 @@ Template.projectchart.onRendered(() => {
   })
   templateInstance.observer.observe(templateInstance.firstNode)
   templateInstance.autorun(() => {
-    if (templateInstance.subscriptionsReady() && templateInstance.projectDescAsHtml.get()) {
+    if (templateInstance.subscriptionsReady() && templateInstance.projectDescription.get()) {
       import('bootstrap').then((bs) => {
         bs.Tooltip.getOrCreateInstance(templateInstance.$('.js-tooltip').get(0), {
-          title: templateInstance.projectDescAsHtml.get(),
-          html: true,
+          title: templateInstance.projectDescription.get(),
+          html: false,
           placement: 'auto',
           boundary: templateInstance.$('.js-tooltip').parent().get(0),
           trigger: 'hover focus',
@@ -136,14 +122,7 @@ Template.projectchart.onRendered(() => {
   templateInstance.autorun(() => {
     if (templateInstance.subscriptionsReady()) {
       const projectDesc = Projects.findOne({ _id: Template.instance().data.projectId })?.desc
-      if (projectDesc instanceof Object) {
-        import('quill-delta-to-html').then((deltaToHtml) => {
-          const converter = new deltaToHtml.QuillDeltaToHtmlConverter(projectDesc.ops, { multiLineParagraph: true, paragraphTag: 'span' })
-          templateInstance.projectDescAsHtml.set(converter.convert())
-        })
-      } else {
-        templateInstance.projectDescAsHtml.set(projectDesc)
-      }
+      templateInstance.projectDescription.set(projectDescriptionText(projectDesc))
     }
   })
   templateInstance.autorun(() => {

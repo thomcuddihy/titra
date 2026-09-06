@@ -34,11 +34,11 @@
                                                 <td>{{t setting.description}}</td>
                                                 <td class="form-switch">
                                                     {{#if isTextArea setting}}
-                                                        <textarea id="{{setting.name}}" name="{{setting.name}}" value="{{setting.value}}" class="form-control js-setting-input"></textarea>
+                                                        <textarea id="{{setting.name}}" name="{{setting.name}}" value="{{editableValue setting}}" class="form-control js-setting-input {{#if isWriteOnly setting}}js-write-only-setting{{/if}}" placeholder="{{writeOnlyPlaceholder setting}}"></textarea>
                                                     {{else if isCheckbox setting}}
                                                         <input id="{{setting.name}}" name="{{setting.name}}" type="checkbox" class="form-check-input js-setting-input form-checkbox" aria-label='{{t setting.description}}' {{isChecked setting}}/>
                                                     {{else}}
-                                                        <input aria-label='{{t setting.description}}' id="{{setting.name}}" name="{{setting.name}}" type="{{setting.type}}" value="{{stringify setting.value}}" class="form-control js-setting-input"/>
+                                                        <input aria-label='{{t setting.description}}' id="{{setting.name}}" name="{{setting.name}}" type="{{inputType setting}}" value="{{editableValue setting}}" placeholder="{{writeOnlyPlaceholder setting}}" autocomplete="{{inputAutocomplete setting}}" class="form-control js-setting-input {{#if isWriteOnly setting}}js-write-only-setting{{/if}}"/>
                                                     {{/if}}
                                                 </td>
                                                 <td>

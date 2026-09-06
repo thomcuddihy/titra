@@ -118,7 +118,7 @@ Template.dashboardList.helpers({
   EditPassword() {
     const dashboard = Template.instance().editingDashboard.get()
     if (dashboard) {
-      return dashboard.password ? '******' : ''
+      return dashboard.hasPassword ? '******' : ''
     }
   },
   isSelectedPeriod(value) {

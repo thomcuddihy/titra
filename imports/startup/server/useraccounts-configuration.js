@@ -4,15 +4,50 @@ import { Random } from 'meteor/random'
 import dockerNames from 'docker-names'
 import { getGlobalSettingAsync } from '../../utils/server_method_helpers'
 import initNewUser from '../../api/projects/setup.js'
+import { configureSignedInUserPublication } from '../../api/users/server/signedInUserPrivacy.js'
+import SecurityState from '../../api/users/server/securityState.js'
+import { reserveInitialAdministrator } from '../../api/users/server/adminSafety.js'
+import { shouldLinkExistingOidcAccount } from '../../utils/oidc/oidcSecurity.js'
+import { oauthEncryptionKey } from '../../utils/oauthEncryptionPolicy.js'
+import {
+  anonymousRegistrationAllowed,
+  firstUserAdministratorAllowed,
+} from '../../api/users/server/registrationPolicy.js'
 
-Accounts.setAdditionalFindUserOnExternalLogin(({ serviceName, serviceData }) => {
-  if (serviceName === 'oidc') {
-    return Accounts.findUserByEmail(serviceData.email)
+const accountsConfiguration = {
+  ambiguousErrorMessages: true,
+  forbidClientAccountCreation: true,
+}
+const oauthSecretKey = oauthEncryptionKey()
+if (oauthSecretKey) accountsConfiguration.oauthSecretKey = oauthSecretKey
+Accounts.config(accountsConfiguration)
+
+// Accounts otherwise publishes the signed-in user's profile through its
+// implicit null publication. Keep that stream ID-only; the navbar subscribes
+// to the exact, live-gated userRoles projection for every UI field.
+configureSignedInUserPublication(Accounts)
+
+Accounts.setAdditionalFindUserOnExternalLogin((attempt) => {
+  // Email-based account linking changes the authentication boundary. Keep it
+  // disabled unless the operator explicitly opts in, and then accept only the
+  // provider's validated, explicitly verified OIDC email claim.
+  if (shouldLinkExistingOidcAccount(attempt)) {
+    return Accounts.findUserByEmail(attempt.serviceData.email)
   }
   return undefined
 })
 Accounts.validateLoginAttempt((attempt) => !attempt.user?.inactive)
 Accounts.onCreateUser(async (options, user) => {
+  // faburem:accounts-anonymous registers its DDP login handler as an import
+  // side effect. Enforce the operator setting at the server-side account
+  // creation boundary so calling that handler directly cannot bypass /try.
+  if (options.anonymous && !anonymousRegistrationAllowed(
+    await getGlobalSettingAsync('enableAnonymousLogins'),
+  )) {
+    throw new Meteor.Error('anonymous-registration-disabled', 'Anonymous registration is disabled.')
+  }
+  const localUser = user
+  if (!localUser._id) localUser._id = Random.id()
   if (options.anonymous) {
     options.profile = {
       name: dockerNames.getRandomName(),
@@ -28,7 +63,6 @@ Accounts.onCreateUser(async (options, user) => {
 
   await initNewUser(user._id, options)
 
-  const localUser = user
   if (options.profile) {
     localUser.profile = options.profile
     delete localUser.profile.currentLanguageProject
@@ -39,8 +73,22 @@ Accounts.onCreateUser(async (options, user) => {
     localUser.emails = options.emails
   }
 
-  // the first user registered on a server will automatically receive the isAdmin flag
-  if (localUser && await Meteor.users.find().countAsync() === 0) {
+  // Never let the first public registrant silently become administrator. A
+  // fresh deployment may retain the historical bootstrap behavior only during
+  // an isolated setup window with an exact, temporary operator opt-in.
+  if (!options.anonymous
+      && firstUserAdministratorAllowed(process.env.TITRA_ENABLE_FIRST_USER_ADMIN)
+      && await reserveInitialAdministrator({ userId: localUser._id }, {
+        countUsers: () => Meteor.users.find({}).countAsync(),
+        findActiveAdministrator: () => Meteor.users.findOneAsync({
+          isAdmin: true, inactive: { $ne: true },
+        }, { fields: { _id: 1 } }),
+        claimBootstrap: (userId) => SecurityState.rawCollection().updateOne({
+          _id: 'initial-administrator', claimed: { $ne: true },
+        }, {
+          $set: { claimed: true, userId, claimedAt: new Date() },
+        }, { upsert: true }),
+      })) {
     localUser.isAdmin = true
   }
 

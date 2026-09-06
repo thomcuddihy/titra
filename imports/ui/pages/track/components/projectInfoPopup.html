@@ -8,10 +8,10 @@
                 </button>
             </div>
             <div class="modal-body">
-                {{#if projectDescAsHtml}}
+                {{#if projectDescription}}
                 <div>
                    <strong>{{t "globals.description"}}</strong><br/>
-                    {{{projectDescAsHtml}}}
+                    <p class="text-break" style="white-space:pre-wrap;">{{projectDescription}}</p>
                 </div>
                 {{/if}}
                 {{#if customer}}

@@ -1,18 +1,73 @@
-import { check } from 'meteor/check'
+import { check, Match } from 'meteor/check'
+import { Meteor } from 'meteor/meteor'
+import { DDPRateLimiter } from 'meteor/ddp-rate-limiter'
 import { ValidatedMethod } from 'meteor/mdg:validated-method'
 import Holidays from 'date-holidays'
 import { authenticationMixin, getUserSettingAsync } from '../../../utils/server_method_helpers.js'
+import { createActivePublicationGate } from '../../../utils/activePublicationGate.js'
+import {
+  boundedHolidayList,
+  boundedHolidayMap,
+  normalizeHolidayCode,
+  normalizeHolidayYear,
+} from './holidayReadLimits.js'
 
 const hd = new Holidays()
+const holidayExecutionGate = createActivePublicationGate({
+  perUser: 5,
+  perPeer: 20,
+  total: 100,
+})
+const holidayMethodNames = new Set([
+  'getHolidays', 'getHolidayCountries', 'getHolidayStates', 'getHolidayRegions',
+])
+
+DDPRateLimiter.addRule({
+  type: 'method',
+  name(name) { return holidayMethodNames.has(name) },
+  userId(userId) { return typeof userId === 'string' && userId.length > 0 },
+}, 60, 60 * 1000)
+DDPRateLimiter.addRule({
+  type: 'method',
+  name(name) { return holidayMethodNames.has(name) },
+  clientAddress(clientAddress) {
+    return typeof clientAddress === 'string' && clientAddress.length > 0
+  },
+}, 120, 60 * 1000)
+
+async function runBoundedHolidayWork(context, work) {
+  const release = holidayExecutionGate.acquire({
+    userId: context.userId,
+    peerAddress: context.connection?.clientAddress,
+  })
+  if (!release) {
+    throw new Meteor.Error(
+      'holiday-work-limit',
+      'Too many holiday requests are already running. Try again shortly.',
+    )
+  }
+  try {
+    return await work()
+  } finally {
+    release()
+  }
+}
 
 /**
  * Retrieves the current holiday based on user settings.
  * @returns {Holidays} The current holiday object.
  */
 async function getCurrentHoliday() {
-  const country = await getUserSettingAsync('holidayCountry')
-  const state = await getUserSettingAsync('holidayState')
-  const region = await getUserSettingAsync('holidayRegion')
+  const country = normalizeHolidayCode(await getUserSettingAsync('holidayCountry'), 'Country', {
+    optional: true,
+  })
+  const state = normalizeHolidayCode(await getUserSettingAsync('holidayState'), 'State', {
+    optional: true,
+  })
+  const region = normalizeHolidayCode(await getUserSettingAsync('holidayRegion'), 'Region', {
+    optional: true,
+  })
+  if (!country) return null
   return new Holidays(country, state, region)
 }
 
@@ -23,14 +78,18 @@ Returns a list of holidays.
 */
 const getHolidays = new ValidatedMethod({
   name: 'getHolidays',
-  validate: null,
+  validate(args) {
+    check(args, Match.Maybe({ year: Match.Maybe(Number) }))
+  },
   mixins: [authenticationMixin],
-  async run() {
-    const h = await getCurrentHoliday()
-    if (h) {
-      return h.getHolidays()
-    }
-    return []
+  async run({ year } = {}) {
+    return runBoundedHolidayWork(this, async () => {
+      const h = await getCurrentHoliday()
+      if (!h) return []
+      return boundedHolidayList(
+        h.getHolidays(normalizeHolidayYear(year)), 'Holiday list',
+      )
+    })
   },
 })
 /**
@@ -40,10 +99,14 @@ Returns a list of holiday countries.
 */
 const getHolidayCountries = new ValidatedMethod({
   name: 'getHolidayCountries',
-  validate: null,
+  validate(args) {
+    check(args, Match.Maybe({}))
+  },
   mixins: [authenticationMixin],
   async run() {
-    return hd.getCountries()
+    return runBoundedHolidayWork(
+      this, () => boundedHolidayMap(hd.getCountries(), 'Holiday countries'),
+    )
   },
 })
 /**
@@ -61,10 +124,11 @@ const getHolidayStates = new ValidatedMethod({
   },
   mixins: [authenticationMixin],
   async run({ country }) {
-    if (country) {
-      return hd.getStates(country)
-    }
-    return false
+    return runBoundedHolidayWork(this, () => {
+      if (!country) return false
+      const normalizedCountry = normalizeHolidayCode(country, 'Country')
+      return boundedHolidayMap(hd.getStates(normalizedCountry), 'Holiday states')
+    })
   },
 })
 /**
@@ -84,10 +148,14 @@ const getHolidayRegions = new ValidatedMethod({
   },
   mixins: [authenticationMixin],
   async run({ country, state }) {
-    if (country && state) {
-      return hd.getRegions(country, state)
-    }
-    return false
+    return runBoundedHolidayWork(this, () => {
+      if (!country || !state) return false
+      const normalizedCountry = normalizeHolidayCode(country, 'Country')
+      const normalizedState = normalizeHolidayCode(state, 'State')
+      return boundedHolidayMap(
+        hd.getRegions(normalizedCountry, normalizedState), 'Holiday regions',
+      )
+    })
   },
 })
 export {

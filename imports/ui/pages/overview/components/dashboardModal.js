@@ -83,7 +83,7 @@ Template.dashboardModal.helpers({
 
   passwordWarningOn() {
     const tpl = Template.instance()
-    if (tpl.data?.editDashboard?.password) {
+    if (tpl.data?.editDashboard?.hasPassword) {
       return false
     }
     return !tpl.passwordInserted.get()
@@ -91,7 +91,7 @@ Template.dashboardModal.helpers({
 
   editPassword() {
     const editDashboard = Template.instance().data?.editDashboard
-    return editDashboard?.password ? '******' : ''
+    return editDashboard?.hasPassword ? '******' : ''
   },
 
   editSlug() {
@@ -133,8 +133,8 @@ Template.dashboardModal.events({
       startDate = document.getElementById('customStartDate')?.value
       endDate = document.getElementById('customEndDate')?.value
     } else {
-      startDate = 'N/A'
-      endDate = 'N/A'
+      startDate = undefined
+      endDate = undefined
     }
     const password = document.getElementById('dashboard-password')?.value
     const slug = document.getElementById('dashboard-slug')?.value

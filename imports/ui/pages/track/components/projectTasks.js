@@ -11,34 +11,43 @@ import '../../overview/editproject/components/taskModal.js'
 import {
   addToolTipToTableCell, getGlobalSetting, showToast, timeInUserUnit, numberWithUserPrecision,
 } from '../../../../utils/frontend_helpers'
+import {
+  escapeDataTableText,
+  secureDataTableColumns,
+} from '../../../../utils/dataTableSecurity.js'
 
 dayjs.extend(utc)
 
 // Progress bar formatter function
 function formatProgressBar(value) {
-  const percent = parseFloat(value)
+  const parsedPercent = Number.parseFloat(value)
+  const percent = Number.isFinite(parsedPercent) ? parsedPercent : 0
+  const width = Math.min(Math.max(percent, 0), 100)
+  const label = escapeDataTableText(value)
   let colorClass = 'bg-success'
   if (percent > 110) colorClass = 'bg-danger'
   else if (percent > 100) colorClass = 'bg-warning'
   return `
     <div class="progress" style="width: 100%; height: 16px;">
       <div class="progress-bar ${colorClass}" role="progressbar"
-           style="width: ${Math.min(percent, 100)}%; font-size: 12px; line-height: 16px;"
+           style="width: ${width}%; font-size: 12px; line-height: 16px;"
            aria-valuenow="${percent}" aria-valuemin="0" aria-valuemax="100">
-        ${value}
+        ${label}
       </div>
     </div>`
 }
 
 // Variance formatter function
 function formatVariance(value) {
-  const variance = parseFloat(value)
+  const parsedVariance = Number.parseFloat(value)
+  const variance = Number.isFinite(parsedVariance) ? parsedVariance : 0
+  const label = escapeDataTableText(value)
   if (variance > 0) {
-    return `<span class="text-danger">+${value}</span>`
+    return `<span class="text-danger">+${label}</span>`
   } if (variance < 0) {
-    return `<span class="text-success">${value}</span>`
+    return `<span class="text-success">${label}</span>`
   }
-  return `<span class="text-muted">${value}</span>`
+  return `<span class="text-muted">${label}</span>`
 }
 
 function taskMapper(task) {
@@ -99,7 +108,7 @@ Template.projectTasks.onRendered(() => {
           name: t('project.default_task'),
           editable: false,
           width: 1,
-          format: (value) => `<div class="form-check"><input type="checkbox" data-id="${value}" class="form-check-input mx-auto" ${Tasks.findOne({ _id: value }).isDefaultTask ? 'checked' : ''}/></div>`,
+          format: (value) => `<div class="form-check"><input type="checkbox" data-id="${escapeDataTableText(value)}" class="form-check-input mx-auto" ${Tasks.findOne({ _id: value })?.isDefaultTask ? 'checked' : ''}/></div>`,
         },
         {
           name: t('globals.task'),
@@ -166,12 +175,13 @@ Template.projectTasks.onRendered(() => {
         }
       }
       const data = tasks.fetch()?.map((task) => taskMapper(task))
+      const securedColumns = secureDataTableColumns(columns)
       if (!templateInstance.datatable) {
         import('frappe-datatable/dist/frappe-datatable.css').then(() => {
           import('frappe-datatable').then((datatable) => {
             const DataTable = datatable.default
             const datatableConfig = {
-              columns,
+              columns: securedColumns,
               data,
               serialNoColumn: false,
               clusterize: false,
@@ -191,7 +201,7 @@ Template.projectTasks.onRendered(() => {
         })
       } else {
         window.requestAnimationFrame(() => {
-          templateInstance.datatable.refresh(data, columns)
+          templateInstance.datatable.refresh(data, securedColumns)
         })
       }
       const ganttTasks = tasks.fetch()?.map((task) => (

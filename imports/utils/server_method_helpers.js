@@ -7,6 +7,31 @@ import { periodToDates } from './periodHelpers.js'
 import { Globalsettings } from '../api/globalsettings/globalsettings.js'
 import { getGlobalSetting } from './frontend_helpers.js'
 import WebhookVerification from '../api/webhookverification/webhookverification.js'
+import {
+  normalizeDetailedFilters,
+  normalizeDetailedPagination,
+  normalizeDetailedPeriod,
+  normalizeDetailedScope,
+  normalizeDetailedSearch,
+  normalizeDetailedSort,
+} from './detailedTimeQuery.js'
+import {
+  serializeTransactionArguments,
+  serializeTransactionUser,
+} from './transactionLogSecurity.js'
+import {
+  authorizeMethodAuthentication,
+  guardPublicationAuthentication,
+  isActionVerificationRecoveryMethod,
+} from './publicationAuthentication.js'
+import { projectAudienceClauses } from '../api/projects/server/publicAccessPolicy.js'
+import {
+  MAX_PROJECT_SCOPE_IDS,
+  assertResultWithinLimit,
+  normalizeResourceScope,
+  normalizeBoundedPagination,
+  resourceScopeSelectsAll,
+} from './resourceLimits.js'
 
 async function getGlobalSettingAsync(name) {
   const globalSetting = await Globalsettings.findOneAsync({ name })
@@ -18,7 +43,7 @@ async function assertCanModifyDashboard (userId, dashboardId) {
   const meteorUser = await Meteor.users.findOneAsync({ _id: userId })
   if (!userId || meteorUser?.inactive) {
     throw new Meteor.Error('notifications.auth_error_method')
-  } else if (meteorUser && meteorUser.isAdmin) {
+  } else if (meteorUser?.isAdmin === true) {
     // Admins can do anything
     return;
   }
@@ -46,7 +71,7 @@ async function assertCanModifyDashboard (userId, dashboardId) {
 };
 
 async function getDefaultVerificationSettingsAsync() {
-  // Get default verification settings from the first active webhook
+  // Get default verification settings from the first active webhook.
   const firstWebhook = await WebhookVerification.findOneAsync({ active: true })
 
   if (!firstWebhook) {
@@ -82,66 +107,78 @@ async function getUserSettingAsync(field) {
  */
 function getProjectListById(projectId) {
   let projectList = []
+  const projectScope = normalizeResourceScope(projectId, 'Project')
   const userId = Meteor.userId()
-  if (projectId.includes('all')) {
+  const audience = projectAudienceClauses(
+    userId, getGlobalSetting('disablePublicProjects') === true,
+  )
+  if (projectScope.all) {
     projectList = Projects.find(
       {
         $and: [
-          { $or: [{ userId }, { public: true }, { team: userId }] },
+          { $or: audience },
           { $or: [{ archived: false }, { archived: { $exists: false } }] },
         ],
       },
-      { fields: { _id: 1 } },
+      { fields: { _id: 1 }, limit: MAX_PROJECT_SCOPE_IDS + 1, sort: { _id: 1 } },
     ).fetch()
+    assertResultWithinLimit(projectList, MAX_PROJECT_SCOPE_IDS, 'Project scope')
     projectList = projectList.map((value) => value._id)
   } else {
     const projectSelector = {
-      _id: projectId,
+      _id: projectScope.value,
       $and: [
-        { $or: [{ userId }, { public: true }, { team: userId }] },
+        { $or: audience },
         { $or: [{ archived: false }, { archived: { $exists: false } }] },
       ],
     }
-    if (projectId instanceof Array) {
-      projectSelector._id = { $in: projectId }
+    if (Array.isArray(projectScope.value)) {
+      projectSelector._id = { $in: projectScope.values }
     }
     projectList = Projects.find(
       projectSelector,
-      { fields: { _id: 1 } },
+      { fields: { _id: 1 }, limit: MAX_PROJECT_SCOPE_IDS + 1, sort: { _id: 1 } },
     ).fetch()
+    assertResultWithinLimit(projectList, MAX_PROJECT_SCOPE_IDS, 'Project scope')
     projectList = projectList.map((value) => value._id)
   }
   return projectList
 }
 async function getProjectListByIdAsync(projectId) {
   let projectList = []
+  const projectScope = normalizeResourceScope(projectId, 'Project')
   const userId = Meteor.userId()
-  if (projectId.includes('all')) {
+  const audience = projectAudienceClauses(
+    userId, await getGlobalSettingAsync('disablePublicProjects') === true,
+  )
+  if (projectScope.all) {
     projectList = await(Projects.find(
       {
         $and: [
-          { $or: [{ userId }, { public: true }, { team: userId }] },
+          { $or: audience },
           { $or: [{ archived: false }, { archived: { $exists: false } }] },
         ],
       },
-      { fields: { _id: 1 } },
+      { fields: { _id: 1 }, limit: MAX_PROJECT_SCOPE_IDS + 1, sort: { _id: 1 } },
     ).fetchAsync())
+    assertResultWithinLimit(projectList, MAX_PROJECT_SCOPE_IDS, 'Project scope')
     projectList = projectList.map((value) => value._id)
   } else {
     const projectSelector = {
-      _id: projectId,
+      _id: projectScope.value,
       $and: [
-        { $or: [{ userId }, { public: true }, { team: userId }] },
+        { $or: audience },
         { $or: [{ archived: false }, { archived: { $exists: false } }] },
       ],
     }
-    if (projectId instanceof Array) {
-      projectSelector._id = { $in: projectId }
+    if (Array.isArray(projectScope.value)) {
+      projectSelector._id = { $in: projectScope.values }
     }
     projectList = await(Projects.find(
       projectSelector,
-      { fields: { _id: 1 } },
+      { fields: { _id: 1 }, limit: MAX_PROJECT_SCOPE_IDS + 1, sort: { _id: 1 } },
     ).fetchAsync())
+    assertResultWithinLimit(projectList, MAX_PROJECT_SCOPE_IDS, 'Project scope')
     projectList = projectList.map((value) => value._id)
   }
   return projectList
@@ -151,9 +188,19 @@ async function getProjectListByIdAsync(projectId) {
  * @param {Object} context - The Meteor.js context object.
  * @throws {Meteor.Error} If user is not authenticated.
  */
-async function checkAuthentication(context) {
-  const meteorUser = await Meteor.users.findOneAsync({ _id: context.userId })
-  if (!context.userId || meteorUser?.inactive) {
+async function checkAuthentication(context, { allowActionVerificationRecovery = false } = {}) {
+  const publicationAuthorized = await guardPublicationAuthentication({
+    context, users: Meteor.users,
+  })
+  if (publicationAuthorized !== undefined) {
+    if (!publicationAuthorized) {
+      throw new Meteor.Error('notifications.auth_error_method')
+    }
+    return true
+  }
+  if (!await authorizeMethodAuthentication({
+    context, users: Meteor.users, allowActionVerificationRecovery,
+  })) {
     throw new Meteor.Error('notifications.auth_error_method')
   }
   return true
@@ -163,11 +210,24 @@ async function checkAuthentication(context) {
  * @param {Object} context - The Meteor.js context object.
  * @throws {Meteor.Error} If user is not authenticated or not an admin.
  */
-async function checkAdminAuthentication(context) {
-  const meteorUser = await Meteor.users.findOneAsync({ _id: context.userId })
-  if (!context.userId || meteorUser?.inactive) {
-    throw new Meteor.Error('notifications.auth_error_method')
-  } else if (meteorUser && !meteorUser.isAdmin) {
+async function checkAdminAuthentication(context, {
+  allowActionVerificationRecovery = false,
+} = {}) {
+  const publicationAuthorized = await guardPublicationAuthentication({
+    context, users: Meteor.users, requireAdmin: true,
+  })
+  if (publicationAuthorized !== undefined) {
+    if (!publicationAuthorized) {
+      throw new Meteor.Error('notifications.auth_error_method')
+    }
+    return
+  }
+  if (!await authorizeMethodAuthentication({
+    context,
+    users: Meteor.users,
+    requireAdmin: true,
+    allowActionVerificationRecovery,
+  })) {
     throw new Meteor.Error('notifications.auth_error_method')
   }
 }
@@ -179,35 +239,53 @@ async function checkAdminAuthentication(context) {
  */
 function getProjectListByCustomer(customer) {
   let projects = []
+  const customerScope = normalizeResourceScope(customer, 'Customer')
   const userId = Meteor.userId()
+  const audience = projectAudienceClauses(
+    userId, getGlobalSetting('disablePublicProjects') === true,
+  )
 
-  if (customer.includes('all')) {
+  if (customerScope.all) {
     projects = Projects.find(
       {
         $and: [
-          { $or: [{ userId }, { public: true }, { team: userId }] },
+          { $or: audience },
           { $or: [{ archived: false }, { archived: { $exists: false } }] },
         ],
       },
-      { _id: 1, name: 1 },
+      {
+        fields: { _id: 1, name: 1 },
+        limit: MAX_PROJECT_SCOPE_IDS + 1,
+        sort: { _id: 1 },
+      },
     )
   } else {
     const selector = {
-      customer,
+      customer: customerScope.value,
       $and: [
-        { $or: [{ userId }, { public: true }, { team: userId }] },
+        { $or: audience },
         { $or: [{ archived: false }, { archived: { $exists: false } }] },
       ],
     }
-    if (customer instanceof Array) {
-      selector.customer = { $in: customer }
+    if (Array.isArray(customerScope.value)) {
+      selector.customer = { $in: customerScope.values }
     }
     projects = Projects.find(
       selector,
-      { _id: 1, name: 1 },
+      {
+        fields: { _id: 1, name: 1 },
+        limit: MAX_PROJECT_SCOPE_IDS + 1,
+        sort: { _id: 1 },
+      },
     )
   }
   return projects
+}
+
+async function getProjectIdsByCustomerAsync(customer) {
+  const projects = await getProjectListByCustomer(customer).fetchAsync()
+  assertResultWithinLimit(projects, MAX_PROJECT_SCOPE_IDS, 'Customer project scope')
+  return projects.map((value) => value._id)
 }
 /**
  * Builds a MongoDB aggregation pipeline selector for calculating total hours within a specified period.
@@ -244,8 +322,13 @@ function getProjectListByCustomer(customer) {
  *                               each document. This field contains the value of the `hours` field converted to
  *                               a decimal format. This stage is ready to be included in an aggregation pipeline.
  */
-async function buildTotalHoursForPeriodSelectorAsync(projectId, period, dates, userId, customer, limit, page) {
+async function buildTotalHoursForPeriodSelectorAsync(
+  projectId, period, dates, userId, customer, limit, page, { countOnly = false } = {},
+) {
   let projectList = []
+  const pagination = normalizeBoundedPagination(limit, page, { label: 'Total-hours result' })
+  const customerScope = normalizeResourceScope(customer, 'Customer')
+  const userScope = normalizeResourceScope(userId, 'User')
   const periodArray = []
   let matchSelector = {}
   const addFields = {
@@ -261,37 +344,32 @@ async function buildTotalHoursForPeriodSelectorAsync(projectId, period, dates, u
   }
   const sortSelector = {
     $sort: {
-      date: -1,
+      '_id.userId': 1,
+      '_id.projectId': 1,
     },
   }
-  const skipSelector = {
-    $skip: 0,
-  }
-  if (page) {
-    skipSelector.$skip = (page - 1) * limit
-  }
+  const skipSelector = { $skip: pagination.skip }
   const limitSelector = {
-    $limit: limit,
+    $limit: pagination.limit,
   }
-  if (!customer.includes('all')) {
-    projectList = await getProjectListByCustomer(customer).fetchAsync()
-    projectList = projectList.map((value) => value._id)
+  if (!customerScope.all) {
+    projectList = await getProjectIdsByCustomerAsync(customerScope.value)
   } else {
     projectList = await getProjectListByIdAsync(projectId)
   }
-  if (period && period.includes('custom')) {
+  if (period === 'custom') {
     matchSelector = {
       $match: {
         projectId: { $in: projectList },
         date: { $gte: dates.startDate, $lte: dates.endDate },
       },
     }
-    if (!userId.includes('all')) {
+    if (!userScope.all) {
       matchSelector = {
         $match: {
           projectId: { $in: projectList },
           date: { $gte: dates.startDate, $lte: dates.endDate },
-          userId,
+          userId: userScope.value,
         },
       }
     }
@@ -303,30 +381,39 @@ async function buildTotalHoursForPeriodSelectorAsync(projectId, period, dates, u
         date: { $gte: startDate, $lte: endDate },
       },
     }
-    if (!userId.includes('all')) {
+    if (!userScope.all) {
       matchSelector = {
         $match: {
           projectId: { $in: projectList },
           date: { $gte: startDate, $lte: endDate },
-          userId,
+          userId: userScope.value,
         },
       }
     }
-  } else if (userId.includes('all')) {
+  } else if (userScope.all) {
     matchSelector = {
       $match: {
         projectId: { $in: projectList },
       },
     }
+  } else {
+    matchSelector = {
+      $match: {
+        projectId: { $in: projectList },
+        userId: userScope.value,
+      },
+    }
   }
-  periodArray.push(addFields)
   periodArray.push(matchSelector)
+  periodArray.push(addFields)
   periodArray.push(groupSelector)
+  if (countOnly) {
+    periodArray.push({ $count: 'totalEntries' })
+    return periodArray
+  }
   periodArray.push(sortSelector)
   periodArray.push(skipSelector)
-  if (limit > 0) {
-    periodArray.push(limitSelector)
-  }
+  periodArray.push(limitSelector)
   return periodArray
 }
 /**
@@ -341,38 +428,43 @@ async function buildTotalHoursForPeriodSelectorAsync(projectId, period, dates, u
  * @returns {Object} The selector.
  */
 
-async function buildDailyHoursSelectorAsync(projectId, period, dates, userId, customer, limit, page) {
+async function buildDailyHoursSelectorAsync(
+  projectId, period, dates, userId, customer, limit, page, { countOnly = false } = {},
+) {
   let projectList = []
-  if (!customer.includes('all')) {
-    projectList = await getProjectListByCustomer(customer).fetchAsync()
-    projectList = projectList.map((value) => value._id)
+  const pagination = normalizeBoundedPagination(limit, page, { label: 'Daily-hours result' })
+  const customerScope = normalizeResourceScope(customer, 'Customer')
+  const userScope = normalizeResourceScope(userId, 'User')
+  if (!customerScope.all) {
+    projectList = await getProjectIdsByCustomerAsync(customerScope.value)
   } else {
     projectList = await getProjectListByIdAsync(projectId)
   }
   const dailyArray = []
   let matchSelector = {}
-  const skipSelector = {
-    $skip: 0,
-  }
-  if (page) {
-    skipSelector.$skip = (page - 1) * limit
-  }
+  const skipSelector = { $skip: pagination.skip }
   const sortSelector = {
     $sort: {
-      date: -1,
+      '_id.date': -1,
+      '_id.userId': 1,
+      '_id.projectId': 1,
     },
   }
   const groupSelector = {
     $group: {
-      _id: { userId: '$userId', projectId: '$projectId', date: '$date' },
+      _id: {
+        userId: '$userId',
+        projectId: '$projectId',
+        date: '$date',
+      },
       totalHours: { $sum: '$hours' },
     },
   }
   const limitSelector = {
-    $limit: limit,
+    $limit: pagination.limit,
   }
   if (period && period === 'custom') {
-    if (userId.includes('all')) {
+    if (userScope.all) {
       matchSelector = {
         $match: {
           projectId: { $in: projectList },
@@ -384,13 +476,13 @@ async function buildDailyHoursSelectorAsync(projectId, period, dates, userId, cu
         $match: {
           projectId: { $in: projectList },
           date: { $gte: dates.startDate, $lte: dates.endDate },
-          userId,
+          userId: userScope.value,
         },
       }
     }
   } else if (period && period !== 'all') {
     const { startDate, endDate } = await periodToDates(period)
-    if (userId.includes('all')) {
+    if (userScope.all) {
       matchSelector = {
         $match: {
           projectId: { $in: projectList },
@@ -402,11 +494,11 @@ async function buildDailyHoursSelectorAsync(projectId, period, dates, userId, cu
         $match: {
           projectId: { $in: projectList },
           date: { $gte: startDate, $lte: endDate },
-          userId,
+          userId: userScope.value,
         },
       }
     }
-  } else if (userId.includes('all')) {
+  } else if (userScope.all) {
     matchSelector = {
       $match: {
         projectId: { $in: projectList },
@@ -416,17 +508,19 @@ async function buildDailyHoursSelectorAsync(projectId, period, dates, userId, cu
     matchSelector = {
       $match: {
         projectId: { $in: projectList },
-        userId,
+        userId: userScope.value,
       },
     }
   }
   dailyArray.push(matchSelector)
   dailyArray.push(groupSelector)
+  if (countOnly) {
+    dailyArray.push({ $count: 'totalEntries' })
+    return dailyArray
+  }
   dailyArray.push(sortSelector)
   dailyArray.push(skipSelector)
-  if (limit > 0) {
-    dailyArray.push(limitSelector)
-  }
+  dailyArray.push(limitSelector)
   return dailyArray
 }
 /**
@@ -439,33 +533,38 @@ async function buildDailyHoursSelectorAsync(projectId, period, dates, userId, cu
  * @param {number} page - The page of entries to get.
  * @returns {Object} The selector.
  */
-async function buildworkingTimeSelectorAsync(projectId, period, dates, userId, limit, page) {
+async function buildworkingTimeSelectorAsync(
+  projectId, period, dates, userId, limit, page, { countOnly = false } = {},
+) {
   let projectList = []
   projectList = await getProjectListByIdAsync(projectId)
+  const pagination = normalizeBoundedPagination(limit, page, { label: 'Working-hours result' })
+  const userScope = normalizeResourceScope(userId, 'User')
   const workingTimeArray = []
   const skipSelector = {
-    $skip: 0,
-  }
-  if (page) {
-    skipSelector.$skip = (page - 1) * limit
+    $skip: pagination.skip,
   }
   let matchSelector = {}
   const sortSelector = {
     $sort: {
-      date: -1,
+      '_id.date': -1,
+      '_id.userId': 1,
     },
   }
   const groupSelector = {
     $group: {
-      _id: { userId: '$userId', date: '$date' },
+      _id: {
+        userId: '$userId',
+        date: '$date',
+      },
       totalTime: { $sum: '$hours' },
     },
   }
   const limitSelector = {
-    $limit: limit,
+    $limit: pagination.limit,
   }
   if (period && period === 'custom') {
-    if (userId.includes('all')) {
+    if (userScope.all) {
       matchSelector = {
         $match: {
           projectId: { $in: projectList },
@@ -477,13 +576,13 @@ async function buildworkingTimeSelectorAsync(projectId, period, dates, userId, l
         $match: {
           projectId: { $in: projectList },
           date: { $gte: dates.startDate, $lte: dates.endDate },
-          userId,
+          userId: userScope.value,
         },
       }
     }
   } else if (period && period !== 'all') {
     const { startDate, endDate } = await periodToDates(period)
-    if (userId.includes('all')) {
+    if (userScope.all) {
       matchSelector = {
         $match: {
           projectId: { $in: projectList },
@@ -495,11 +594,11 @@ async function buildworkingTimeSelectorAsync(projectId, period, dates, userId, l
         $match: {
           projectId: { $in: projectList },
           date: { $gte: startDate, $lte: endDate },
-          userId,
+          userId: userScope.value,
         },
       }
     }
-  } else if (userId.includes('all')) {
+  } else if (userScope.all) {
     matchSelector = {
       $match: {
         projectId: { $in: projectList },
@@ -509,17 +608,19 @@ async function buildworkingTimeSelectorAsync(projectId, period, dates, userId, l
     matchSelector = {
       $match: {
         projectId: { $in: projectList },
-        userId,
+        userId: userScope.value,
       },
     }
   }
   workingTimeArray.push(matchSelector)
   workingTimeArray.push(groupSelector)
-  workingTimeArray.push(skipSelector)
-  workingTimeArray.push(sortSelector)
-  if (limit > 0) {
-    workingTimeArray.push(limitSelector)
+  if (countOnly) {
+    workingTimeArray.push({ $count: 'totalEntries' })
+    return workingTimeArray
   }
+  workingTimeArray.push(sortSelector)
+  workingTimeArray.push(skipSelector)
+  workingTimeArray.push(limitSelector)
   return workingTimeArray
 }
 /**
@@ -527,16 +628,21 @@ async function buildworkingTimeSelectorAsync(projectId, period, dates, userId, l
  * @param {Object} entry - The entry to map.
  * @returns {Object} The mapped entry.
  */
-async function workingTimeEntriesMapper(entry) {
+async function workingTimeEntriesMapper(entry, context = {}) {
   dayjs.extend(customParseFormat)
-  const meteorUser = await Meteor.users.findOneAsync({ _id: entry._id.userId })
-  const userBreakStartTime = dayjs(meteorUser?.profile?.breakStartTime ? meteorUser.profile.breakStartTime : await getGlobalSettingAsync('breakStartTime'), 'HH:mm')
-  const userBreakDuration = meteorUser?.profile?.breakDuration ? meteorUser.profile.breakDuration : await getGlobalSettingAsync('breakDuration')
+  const meteorUser = context.usersById
+    ? context.usersById.get(entry._id.userId)
+    : await Meteor.users.findOneAsync({ _id: entry._id.userId })
+  const setting = async (name) => (Object.prototype.hasOwnProperty.call(context.settings || {}, name)
+    ? context.settings[name]
+    : getGlobalSettingAsync(name))
+  const userBreakStartTime = dayjs(meteorUser?.profile?.breakStartTime ? meteorUser.profile.breakStartTime : await setting('breakStartTime'), 'HH:mm')
+  const userBreakDuration = meteorUser?.profile?.breakDuration ? meteorUser.profile.breakDuration : await setting('breakDuration')
   const userBreakEndTime = dayjs(userBreakStartTime, 'HH:mm').add(userBreakDuration, 'hour')
-  const userRegularWorkingTime = meteorUser?.profile?.regularWorkingTime ? meteorUser.profile.regularWorkingTime : await getGlobalSettingAsync('regularWorkingTime')
-  const userStartTime = meteorUser?.profile?.dailyStartTime ? meteorUser.profile.dailyStartTime : await getGlobalSettingAsync('dailyStartTime')
+  const userRegularWorkingTime = meteorUser?.profile?.regularWorkingTime ? meteorUser.profile.regularWorkingTime : await setting('regularWorkingTime')
+  const userStartTime = meteorUser?.profile?.dailyStartTime ? meteorUser.profile.dailyStartTime : await setting('dailyStartTime')
   let userEndTime = dayjs(userStartTime, 'HH:mm').add(entry.totalTime, 'hour')
-  if (await getGlobalSettingAsync('addBreakToWorkingTime')) {
+  if (await setting('addBreakToWorkingTime')) {
     userEndTime = userEndTime.add(userBreakDuration, 'hour')
   }
   return {
@@ -567,20 +673,25 @@ async function workingTimeEntriesMapper(entry) {
 async function buildDetailedTimeEntriesForPeriodSelectorAsync({
   projectId, search, customer, period, dates, userId, limit, page, sort, filters,
 }) {
+  projectId = normalizeDetailedScope(projectId, 'project')
+  customer = normalizeDetailedScope(customer, 'customer')
+  userId = normalizeDetailedScope(userId, 'user')
+  search = normalizeDetailedSearch(search)
+  sort = normalizeDetailedSort(sort)
+  ;({ period, dates } = normalizeDetailedPeriod(period, dates))
+  const pagination = normalizeDetailedPagination(limit, page)
+  const normalizedFilters = normalizeDetailedFilters(filters)
   const detailedTimeArray = []
   let projectList = await getProjectListByIdAsync(projectId)
-  if (!customer.includes('all') && projectId.includes('all')) {
-    projectList = await getProjectListByCustomer(customer).fetchAsync()
-    projectList = projectList.map((value) => value._id)
+  if (!resourceScopeSelectsAll(customer) && resourceScopeSelectsAll(projectId)) {
+    projectList = await getProjectIdsByCustomerAsync(customer)
   }
   const query = { projectId: { $in: projectList } }
   if (search) {
     query.task = { $regex: `.*${search.replace(/[-[\]{}()*+?.,\\/^$|#\s]/g, '\\$&')}.*`, $options: 'i' }
   }
   const options = { sort: {} }
-  if (limit && limit > 0) {
-    options.limit = limit
-  }
+  if (pagination.limit) options.limit = pagination.limit
   if (sort) {
     let field
     let order
@@ -619,16 +730,14 @@ async function buildDetailedTimeEntriesForPeriodSelectorAsync({
     options.sort = { date: -1 }
   }
 
-  if (page) {
-    options.skip = (page - 1) * limit
-  }
+  if (pagination.skip) options.skip = pagination.skip
   if (period === 'custom') {
     query.date = { $gte: dates.startDate, $lte: dates.endDate }
   } else if (period !== 'all') {
     const { startDate, endDate } = await periodToDates(period)
     query.date = { $gte: startDate, $lte: endDate }
   }
-  if (!userId.includes('all')) {
+  if (!resourceScopeSelectsAll(userId)) {
     if (userId instanceof Array) {
       query.userId = { $in: userId }
     } else {
@@ -636,32 +745,37 @@ async function buildDetailedTimeEntriesForPeriodSelectorAsync({
     }
   }
   let finalQuery = query
-  if (filters) {
+  if (normalizedFilters && Object.keys(normalizedFilters).length) {
+    const safeFilters = { ...normalizedFilters }
     finalQuery = {}
-    for (const filterKey in filters) {
-      if (filters.hasOwnProperty(filterKey)) {
-        const filterValue = filters[filterKey]
+    for (const filterKey in safeFilters) {
+      if (Object.prototype.hasOwnProperty.call(safeFilters, filterKey)) {
+        const filterValue = safeFilters[filterKey]
         if (filterKey === 'customer') {
-          let projectIds = await getProjectListByCustomer(filterValue).fetchAsync()
-          projectIds = projectIds.map((value) => value._id)
-          filters.projectId = { $in: projectIds }
-          delete filters[filterKey]
+          const projectIds = await getProjectIdsByCustomerAsync(filterValue)
+          safeFilters.projectId = { $in: projectIds }
+          delete safeFilters[filterKey]
         } else if (filterKey === 'state' && filterValue === 'new') {
-          filters.$or = [{ state: { $exists: false } }, { state: 'new' }]
-          delete filters[filterKey]
-        } else if (filterKey === 'date' && typeof filters[filterKey] === 'string') {
+          safeFilters.$or = [{ state: { $exists: false } }, { state: 'new' }]
+          delete safeFilters[filterKey]
+        } else if (filterKey === 'date' && typeof safeFilters[filterKey] === 'string') {
           dayjs.extend(customParseFormat)
           const startDate = dayjs(filterValue, getGlobalSetting('dateformat')).startOf('day').toDate()
           const endDate = dayjs(filterValue, getGlobalSetting('dateformat')).endOf('day').toDate()
-          filters.date = { $gte: startDate, $lte: endDate }
+          if (Number.isNaN(startDate.getTime()) || Number.isNaN(endDate.getTime())) {
+            throw new TypeError('Detailed date filter is invalid.')
+          }
+          safeFilters.date = { $gte: startDate, $lte: endDate }
         } else if (filterKey === 'hours' && typeof filterValue === 'string') {
-          filters.hours = Number(filterValue)
+          const hours = Number(filterValue)
+          if (!Number.isFinite(hours)) throw new TypeError('Detailed hours filter is invalid.')
+          safeFilters.hours = hours
         }
       }
     }
     finalQuery.$and = []
     finalQuery.$and.push(query)
-    finalQuery.$and.push(filters)
+    finalQuery.$and.push(safeFilters)
   }
   detailedTimeArray.push(finalQuery)
   detailedTimeArray.push(options)
@@ -669,16 +783,18 @@ async function buildDetailedTimeEntriesForPeriodSelectorAsync({
 }
 function authenticationMixin(methodOptions) {
   const runFunc = methodOptions.run
+  const allowActionVerificationRecovery = isActionVerificationRecoveryMethod(methodOptions.name)
   methodOptions.run = async function (args) {
-    await checkAuthentication(this)
+    await checkAuthentication(this, { allowActionVerificationRecovery })
     return runFunc.call(this, args)
   }
   return methodOptions
 }
 function adminAuthenticationMixin(methodOptions) {
   const runFunc = methodOptions.run
+  const allowActionVerificationRecovery = isActionVerificationRecoveryMethod(methodOptions.name)
   methodOptions.run = async function (args) {
-    await checkAdminAuthentication(this)
+    await checkAdminAuthentication(this, { allowActionVerificationRecovery })
     return runFunc.call(this, args)
   }
   return methodOptions
@@ -688,15 +804,13 @@ function transactionLogMixin(methodOptions) {
   methodOptions.run = async function (args) {
     if (await getGlobalSettingAsync('enableTransactions')) {
       const user = await Meteor.users.findOneAsync({ _id: this.userId }, {
-        _id: 1, 'profile.name': 1, emails: 1, isAdmin: 1,
+        fields: { _id: 1, 'profile.name': 1, isAdmin: 1 },
       })
-      if(user) {
+      if (user) {
         const transaction = {
-          user: JSON.stringify({
-            _id: user._id, name: user.profile.name, emails: user.emails, isAdmin: user.isAdmin,
-          }),
+          user: serializeTransactionUser(user),
           method: this.name,
-          args: JSON.stringify(args),
+          args: serializeTransactionArguments(args, this.name),
           timestamp: new Date(),
         }
         await Transactions.insertAsync(transaction)

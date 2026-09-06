@@ -29,7 +29,7 @@ const oidcFields = [
     property: 'userinfoEndpoint', label: 'Userinfo Endpoint', type: 'text', value: '',
   },
   {
-    property: 'idTokenWhitelistFields', label: 'Id Token Fields', type: 'text', value: '',
+    property: 'idTokenWhitelistFields', label: 'Userinfo Fields', type: 'text', value: '',
   },
   {
     property: 'requestPermissions', label: 'Request Permissions', type: 'text', value: '"openid", "profile", "email"',
@@ -69,9 +69,10 @@ function disableDefaultLoginForm() {
 }
 
 function getOidcConfiguration(name) {
+  if (name === 'secret') return ''
   if (getGlobalSetting('enableOpenIDConnect')) {
-    return ServiceConfiguration.configurations.findOne({ service: SERVICE_NAME })
-      ? ServiceConfiguration.configurations.findOne({ service: SERVICE_NAME })[name] : false
+    const configuration = ServiceConfiguration.configurations.findOne({ service: SERVICE_NAME })
+    return configuration ? configuration[name] : false
   }
   return ''
 }

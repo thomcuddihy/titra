@@ -1,9 +1,24 @@
 import { ValidatedMethod } from 'meteor/mdg:validated-method'
+import { OAuth } from 'meteor/oauth'
 import { ServiceConfiguration } from 'meteor/service-configuration'
 import { defaultSettings, Globalsettings } from '../globalsettings.js'
 import { adminAuthenticationMixin, transactionLogMixin } from '../../../utils/server_method_helpers.js'
 import { registerOidc } from '../../../utils/oidc/oidc_server.js'
 import { validateSandboxCode } from '../../../utils/vm_sandbox.js'
+import {
+  isLiteralTimeEntryRule,
+  unsafeLegacyScriptsEnabled,
+} from '../../../utils/legacyScriptPolicy.js'
+import {
+  shouldPreserveWriteOnlySetting,
+  shouldSealGlobalSetting,
+} from '../globalSettingSecurity.js'
+import {
+  STORED_CONFIGURATION_KEYS,
+  mergeOidcConfiguration,
+  normalizeOidcConfiguration,
+} from '../../../utils/oidc/oidcSecurity.js'
+import { requireOAuthEncryptionConfigured } from '../../../utils/oauthEncryptionPolicy.js'
 /**
 @summary Updates global settings
 @param {Array} settingsArray - Array of settings to update
@@ -23,10 +38,42 @@ const updateGlobalSettings = new ValidatedMethod({
       check(setting.value, Match.OneOf(String, Number, Boolean))
       // Special validation for timeEntryRule to prevent code injection
       if (setting.name === 'timeEntryRule' && typeof setting.value === 'string') {
-        validateSandboxCode(setting.value)
+        if (!isLiteralTimeEntryRule(setting.value) && !unsafeLegacyScriptsEnabled()) {
+          throw new Meteor.Error(
+            'unsafe-legacy-script-disabled',
+            'Custom JavaScript time-entry rules require the explicit unsafe legacy-script server opt-in.',
+          )
+        }
+        if (!isLiteralTimeEntryRule(setting.value)) validateSandboxCode(setting.value)
+      }
+      // Secret settings are write-only in the administration client. A blank
+      // placeholder therefore means "leave the stored credential unchanged".
+      // Determine secrecy from the stored definition, never client metadata.
+      // eslint-disable-next-line no-await-in-loop
+      const storedSetting = await Globalsettings.findOneAsync({ name: setting.name }, {
+        fields: { _id: 1, name: 1, type: 1, restricted: 1 },
+      })
+      if (!storedSetting || shouldPreserveWriteOnlySetting(storedSetting, setting.value)) {
+        // eslint-disable-next-line no-continue
+        continue
       }
       // eslint-disable-next-line no-await-in-loop
-      await Globalsettings.updateAsync({ name: setting.name }, { $set: { value: setting.value } })
+      if (shouldSealGlobalSetting(storedSetting.name)) {
+        try {
+          requireOAuthEncryptionConfigured()
+        } catch {
+          throw new Meteor.Error(
+            'oauth-encryption-required',
+            'Configure persistent OAuth credential encryption before saving secrets.',
+          )
+        }
+      }
+      const nextValue = shouldSealGlobalSetting(storedSetting.name)
+        ? OAuth.sealSecret(setting.value) : setting.value
+      await Globalsettings.updateAsync(
+        { _id: storedSetting._id },
+        { $set: { value: nextValue } },
+      )
     }
   },
 })
@@ -82,30 +129,46 @@ const updateOidcSettings = new ValidatedMethod({
   },
   mixins: [adminAuthenticationMixin, transactionLogMixin],
   async run({ configuration }) {
-    // Preserve existing secret if not provided
-    if (!configuration.secret || configuration.secret.length === 0) {
-      const existing = await ServiceConfiguration.configurations.findOneAsync({ service: 'oidc' })
-      if (existing && existing.secret) {
-        configuration.secret = existing.secret
-      } else {
-        delete configuration.secret
-      }
-    }
-    for (const [key, value] of Object.entries(configuration)) {
-      await ServiceConfiguration.configurations.upsertAsync({ service: 'oidc' }, {
-        $set: {
-          [key]: value,
-        },
+    const existing = await ServiceConfiguration.configurations.findOneAsync({ service: 'oidc' })
+    let normalized
+    try {
+      const merged = mergeOidcConfiguration(configuration, existing || {})
+      const suppliedSecret = Object.prototype.hasOwnProperty.call(configuration, 'secret')
+        ? configuration.secret : undefined
+      if (suppliedSecret !== undefined && typeof suppliedSecret !== 'string') throw new Error()
+      const replacesSecret = typeof suppliedSecret === 'string' && suppliedSecret.trim() !== ''
+      if (replacesSecret) merged.secret = suppliedSecret
+      normalized = normalizeOidcConfiguration(merged, {
+        environment: process.env,
+        preservedSecret: replacesSecret ? undefined : existing?.secret,
       })
+      if (replacesSecret || typeof existing?.secret === 'string') {
+        requireOAuthEncryptionConfigured()
+        normalized.secret = OAuth.sealSecret(normalized.secret)
+      }
+    } catch {
+      throw new Meteor.Error(
+        'invalid-oidc-configuration',
+        'The OpenID Connect configuration is invalid.',
+      )
     }
-    if (configuration.secret && configuration.secret.length > 0) {
-      try {
-        if (Accounts.oauth.serviceNames().indexOf('oidc') === -1) {
-          await registerOidc()
-        }
-      } catch (error) { console.error(error) }
-    } else {
-      delete configuration.secret
+
+    const modifier = { $set: normalized }
+    const obsoleteFields = Object.keys(existing || {}).filter(
+      (key) => key !== '_id' && !STORED_CONFIGURATION_KEYS.includes(key),
+    )
+    if (obsoleteFields.length > 0) {
+      modifier.$unset = Object.fromEntries(obsoleteFields.map((key) => [key, '']))
+    }
+    await ServiceConfiguration.configurations.upsertAsync({ service: 'oidc' }, modifier)
+
+    try {
+      if (Accounts.oauth.serviceNames().indexOf('oidc') === -1) await registerOidc()
+    } catch {
+      throw new Meteor.Error(
+        'oidc-registration-failed',
+        'The OpenID Connect service could not be enabled.',
+      )
     }
   },
 })

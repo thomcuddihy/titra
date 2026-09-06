@@ -17,6 +17,8 @@ import {
   getGlobalSetting,
   showToast,
 } from '../../../../utils/frontend_helpers.js'
+import { encodeCsv } from '../../../../utils/csvExport.js'
+import { secureDataTableColumns } from '../../../../utils/dataTableSecurity.js'
 
 Template.periodtimetable.onCreated(function periodtimetableCreated() {
   dayjs.extend(utc)
@@ -86,13 +88,14 @@ Template.periodtimetable.onRendered(() => {
         editable: false,
         format: numberWithUserPrecision,
       })
+      const securedColumns = secureDataTableColumns(columns)
       if (!templateInstance.datatable) {
         import('frappe-datatable/dist/frappe-datatable.css').then(() => {
           import('frappe-datatable').then((datatable) => {
             const DataTable = datatable.default
             try {
               templateInstance.datatable = new DataTable('#datatable-container', {
-                columns,
+                columns: securedColumns,
                 serialNoColumn: false,
                 clusterize: false,
                 layout: 'ratio',
@@ -109,7 +112,7 @@ Template.periodtimetable.onRendered(() => {
       if (templateInstance.datatable && templateInstance.periodTimecards.get()
         && window.BootstrapLoaded.get()) {
         templateInstance.datatable
-          .refresh(data, columns)
+          .refresh(data, securedColumns)
         if (templateInstance.periodTimecards.get().length === 0) {
           $('.dt-scrollable').height('auto')
         } else {
@@ -134,18 +137,17 @@ Template.periodtimetable.helpers({
 Template.periodtimetable.events({
   'click .js-export-csv': (event, templateInstance) => {
     event.preventDefault()
-    let csvArray = [`\uFEFF${t('globals.project')},${t('globals.resource')},${getUserTimeUnitVerbose()}\r\n`]
-    if (!getGlobalSetting('showResourceInDetails')) {
-      csvArray = [`\uFEFF${t('globals.project')},${getUserTimeUnitVerbose()}\r\n`]
-    }
+    const showResource = getGlobalSetting('showResourceInDetails')
+    const csvRows = [[t('globals.project')]]
+    if (showResource) csvRows[0].push(t('globals.resource'))
+    csvRows[0].push(getUserTimeUnitVerbose())
     for (const timeEntry of templateInstance.periodTimecards.get().map(totalHoursForPeriodMapper)) {
-      if (getGlobalSetting('showResourceInDetails')) {
-        csvArray.push(`${timeEntry.projectId},${timeEntry.userId},${timeEntry.totalHours}\r\n`)
-      } else {
-        csvArray.push(`${timeEntry.projectId},${timeEntry.totalHours}\r\n`)
-      }
+      const row = [timeEntry.projectId]
+      if (showResource) row.push(timeEntry.userId)
+      row.push(timeEntry.totalHours)
+      csvRows.push(row)
     }
-    saveAs(new Blob(csvArray, { type: 'text/csv;charset=utf-8;header=present' }), `titra_total_time_${templateInstance.data.period.get()}.csv`)
+    saveAs(new Blob([encodeCsv(csvRows)], { type: 'text/csv;charset=utf-8;header=present' }), `titra_total_time_${templateInstance.data.period.get()}.csv`)
   },
   'click .js-export-xlsx': (event, templateInstance) => {
     event.preventDefault()
