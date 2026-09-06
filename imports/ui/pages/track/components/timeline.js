@@ -7,12 +7,17 @@ import { FlowRouter } from 'meteor/ostrio:flow-router-extra'
 import Projects from '../../../../api/projects/projects'
 import Timecards from '../../../../api/timecards/timecards'
 import { getGlobalSetting, getWeekDays } from '../../../../utils/frontend_helpers'
+import {
+  dateOnlyFromLocalDate,
+  dateOnlyFromUTCDate,
+} from '../../../../utils/timecardDate.js'
 
 Template.timeline.onCreated(function timelineCreated() {
   this.subscribe('myprojects', {})
   dayjs.extend(utc)
-  this.startDate = new ReactiveVar(dayjs.utc().subtract(2, 'week'))
-  this.endDate = new ReactiveVar(dayjs.utc().add(2, 'week'))
+  const today = dayjs.utc(dateOnlyFromLocalDate(new Date()), 'YYYY-MM-DD')
+  this.startDate = new ReactiveVar(today.subtract(2, 'week'))
+  this.endDate = new ReactiveVar(today.add(2, 'week'))
   this.dateRange = new ReactiveVar([])
   this.projectList = new ReactiveVar([])
   this.timesheetData = new ReactiveVar([])
@@ -69,26 +74,36 @@ Template.timeline.helpers({
     return Template.instance().dateRange.get()
   },
   formatDate(date) {
-    return dayjs(date).format(getGlobalSetting('weekviewDateFormat'))
+    return dayjs.utc(date).format(getGlobalSetting('weekviewDateFormat'))
+  },
+  dateOnly(date) {
+    return dateOnlyFromUTCDate(date)
   },
   getProjectName(projectId) {
     return Projects.findOne({ _id: projectId })?.name
   },
   getTimeEntriesForDateAndProject(date, projectId) {
-    return Timecards.find({ projectId, date: dayjs.utc(date).startOf('day').toDate() })
+    return Timecards.find({
+      projectId,
+      date: {
+        $gte: dayjs.utc(date).startOf('day').toDate(),
+        $lte: dayjs.utc(date).endOf('day').toDate(),
+      },
+    })
   },
   getProjectColor(projectId) {
     return Projects.findOne({ _id: projectId })?.color
   },
   highlightToday(date) {
-    return dayjs.utc(date).format(getGlobalSetting('weekviewDateFormat')) === dayjs.utc().format(getGlobalSetting('weekviewDateFormat')) ? 'bg-primary' : ''
+    return dateOnlyFromUTCDate(date) === dateOnlyFromLocalDate(new Date()) ? 'bg-primary' : ''
   },
   tcid: () => Template.instance().tcid,
   selectedDate: () => Template.instance().selectedDate,
   selectedProjectId: () => Template.instance().selectedProjectId,
 })
 Template.timeline.onRendered(() => {
-  document.querySelector(`[data-date="${dayjs.utc().format(getGlobalSetting('weekviewDateFormat'))}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })
+  const today = dayjs.utc(dateOnlyFromLocalDate(new Date()), 'YYYY-MM-DD')
+  document.querySelector(`[data-date-only="${today.format('YYYY-MM-DD')}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })
   const templateInstance = Template.instance()
   templateInstance.startObserver = new IntersectionObserver((entries) => {
     entries.forEach((entry) => {
@@ -120,7 +135,7 @@ Template.timeline.onRendered(() => {
 Template.timeline.events({
   'click .js-add-time-entry-date': (event, templateInstance) => {
     event.preventDefault()
-    templateInstance.selectedDate.set(event.currentTarget.dataset.date)
+    templateInstance.selectedDate.set(event.currentTarget.dataset.dateOnly)
     templateInstance.selectedProjectId.set()
     templateInstance.tcid.set()
     new Modal(templateInstance.$('#edit-tc-entry-modal')[0], { focus: false }).show()
@@ -134,7 +149,7 @@ Template.timeline.events({
   },
   'click .js-add-time-entry-project': (event, templateInstance) => {
     event.preventDefault()
-    templateInstance.selectedDate.set(event.currentTarget.dataset.date)
+    templateInstance.selectedDate.set(event.currentTarget.dataset.dateOnly)
     templateInstance.selectedProjectId.set(event.currentTarget.dataset.projectid)
     templateInstance.tcid.set()
     new Modal(templateInstance.$('#edit-tc-entry-modal')[0], { focus: false }).show()

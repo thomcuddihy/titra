@@ -439,6 +439,7 @@
     "siwapp_configuration": "你需要配置 Siwapp 集成才能使用这个功能",
     "time_entry_deleted": "工时记录已删除",
     "time_entry_updated": "工时记录已更新",
+    "week_aggregate_edit_conflict": "此周单元格合并了多条工时记录，无法作为单条记录编辑。请在“日”或“详细信息”视图中逐条编辑。",
     "time_entry_saved": "工时记录已保存",
     "delete_confirm": "删除操作无法恢复，你确定要执行吗？",
     "project_update_success": "项目已更新",

@@ -446,6 +446,7 @@
     "siwapp_configuration": "Sie müssen zunächst die Siwapp Schnittstelle konfigurieren um diese Funktion zu verwenden.",
     "time_entry_deleted": "Eintrag gelöscht",
     "time_entry_updated": "Eintrag aktualisiert",
+    "week_aggregate_edit_conflict": "Diese Wochenzelle fasst mehrere Zeiteinträge zusammen und kann nicht als einzelner Eintrag bearbeitet werden. Bearbeiten Sie die Einträge einzeln in der Tages- oder Detailansicht.",
     "time_entry_saved": "Eintrag gespeichert",
     "delete_confirm": "Das Löschen kann nicht rückgängig gemacht werden, möchten Sie wirklich fortfahren?",
     "project_update_success": "Projekt aktualisiert",

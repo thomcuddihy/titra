@@ -7,6 +7,7 @@ import { periodToDates } from './periodHelpers.js'
 import { Globalsettings } from '../api/globalsettings/globalsettings.js'
 import { getGlobalSetting } from './frontend_helpers.js'
 import WebhookVerification from '../api/webhookverification/webhookverification.js'
+import { timecardDateAggregationExpression } from './timecardDate.js'
 
 async function getGlobalSettingAsync(name) {
   const globalSetting = await Globalsettings.findOneAsync({ name })
@@ -364,7 +365,11 @@ async function buildDailyHoursSelectorAsync(projectId, period, dates, userId, cu
   }
   const groupSelector = {
     $group: {
-      _id: { userId: '$userId', projectId: '$projectId', date: '$date' },
+      _id: {
+        userId: '$userId',
+        projectId: '$projectId',
+        date: timecardDateAggregationExpression(),
+      },
       totalHours: { $sum: '$hours' },
     },
   }
@@ -457,7 +462,10 @@ async function buildworkingTimeSelectorAsync(projectId, period, dates, userId, l
   }
   const groupSelector = {
     $group: {
-      _id: { userId: '$userId', date: '$date' },
+      _id: {
+        userId: '$userId',
+        date: timecardDateAggregationExpression(),
+      },
       totalTime: { $sum: '$hours' },
     },
   }

@@ -16,6 +16,14 @@ import {
   getGlobalSetting, getUserSetting, showToast, waitForElement,
 } from '../../../utils/frontend_helpers.js'
 import { getHolidays, checkHoliday } from '../../../utils/holiday.js'
+import {
+  dateOnlyFromLocalDate,
+  dateOnlyToUTCDate,
+  getTimecardDateOnly,
+  getTimecardStartTime,
+  isDateOnly,
+  isStartTime,
+} from '../../../utils/timecardDate.js'
 import './tracktime.html'
 import './components/projectsearch.js'
 import './components/tasksearch.js'
@@ -30,7 +38,11 @@ import './components/magicPopup.js'
 function isHoliday(date) {
   const templateInstance = Template.instance()
   const holidays = templateInstance.holidays.get()
-  return checkHoliday(holidays, date)
+  return checkHoliday(holidays, dateOnlyToUTCDate(date))
+}
+
+function dateOnlyFromArgument(value) {
+  return isDateOnly(value) ? value : dateOnlyFromLocalDate(value)
 }
 
 Template.tracktime.onRendered(() => {
@@ -48,10 +60,10 @@ Template.tracktime.onRendered(() => {
         && weekDaysMin.get()?.length > 0 && months.get()?.length > 0) {
       templateInstance.tinydatepicker = TinyDatePicker(templateInstance.$('.js-date')[0], {
         format(date) {
-          return date ? dayjs.utc(date).format(getGlobalSetting('dateformatVerbose')) : dayjs.utc().format(getGlobalSetting('dateformatVerbose'))
+          return date ? dayjs(date).format(getGlobalSetting('dateformatVerbose')) : dayjs().format(getGlobalSetting('dateformatVerbose'))
         },
         parse(date) {
-          return dayjs.utc(date, [getGlobalSetting('dateformatVerbose'), undefined]).toDate()
+          return dayjs(date, [getGlobalSetting('dateformatVerbose'), undefined]).toDate()
         },
         lang: {
           days: weekDaysMin.get(),
@@ -64,7 +76,7 @@ Template.tracktime.onRendered(() => {
         dayOffset: getUserSetting('startOfWeek'),
       }).on('select', (_, dp) => {
         if (!dp.state.selectedDate) {
-          templateInstance.$('.js-date').first().val(dayjs.utc().format(getGlobalSetting('dateformatVerbose')))
+          templateInstance.$('.js-date').first().val(dayjs().format(getGlobalSetting('dateformatVerbose')))
         }
       })
     }
@@ -77,7 +89,7 @@ Template.tracktime.onCreated(function tracktimeCreated() {
   dayjs.extend(utc)
   dayjs.extend(customParseFormat)
   dayjs.extend(duration)
-  this.date = new ReactiveVar(dayjs.utc().toDate()) // Ensure consistent timezone usage
+  this.date = new ReactiveVar(dateOnlyFromLocalDate(new Date()))
   this.projectId = new ReactiveVar()
   this.tcid = new ReactiveVar()
   this.totalTime = new ReactiveVar(0)
@@ -96,10 +108,11 @@ Template.tracktime.onCreated(function tracktimeCreated() {
       this.tcid.set(FlowRouter.getParam('tcid'))
     }
     if (this.data?.dateArg && this.data?.dateArg.get()) {
-      this.date.set(this.data?.dateArg.get())
+      this.date.set(dateOnlyFromArgument(this.data.dateArg.get()))
     } else if (!(this.data?.dateArg && this.data?.dateArg.get())
       && !(this.data?.tcid && this.data?.tcid.get()) && FlowRouter.getQueryParam('date')) {
-      this.date.set(dayjs.utc(FlowRouter.getQueryParam('date'), 'YYYY-MM-DD').toDate()) // Ensure consistent timezone usage
+      const queryDate = FlowRouter.getQueryParam('date')
+      this.date.set(isDateOnly(queryDate) ? queryDate : dateOnlyFromLocalDate(new Date()))
     }
     if (this.data?.projectIdArg && this.data?.projectIdArg.get()) {
       this.projectId.set(this.data?.projectIdArg.get())
@@ -109,14 +122,15 @@ Template.tracktime.onCreated(function tracktimeCreated() {
     if (this.tcid.get()) {
       this.subscribe('singleTimecard', this.tcid.get())
       if (this.subscriptionsReady()) {
-        this.time_entry.set(Timecards.findOne(this.tcid.get()))
-        this.date.set(Timecards.findOne({ _id: this.tcid.get() })
-          ? dayjs.utc(Timecards.findOne({ _id: this.tcid.get() }).date).toDate() // Ensure consistent timezone usage
-          : dayjs.utc().toDate())
-        this.projectId.set(Timecards.findOne({ _id: this.tcid.get() }) ? Timecards.findOne({ _id: this.tcid.get() }).projectId : '')
+        const timecard = Timecards.findOne({ _id: this.tcid.get() })
+        this.time_entry.set(timecard)
+        this.date.set(timecard
+          ? getTimecardDateOnly(timecard)
+          : dateOnlyFromLocalDate(new Date()))
+        this.projectId.set(timecard ? timecard.projectId : '')
       }
     } else {
-      handle = this.subscribe('myTimecardsForDate', { date: dayjs.utc(this.date.get()).format('YYYY-MM-DD') }) // Ensure consistent timezone usage
+      handle = this.subscribe('myTimecardsForDate', { date: this.date.get() })
       if (handle.ready()) {
         Timecards.find().forEach((timecard) => {
           this.subscribe('publicProjectName', timecard.projectId)
@@ -200,14 +214,21 @@ Template.tracktime.events({
     const projectId = templateInstance.projectId.get()
     const user = templateInstance.$('.js-usersearch-input')?.val() || Meteor.userId()
     const task = templateInstance.$('.js-tasksearch-input').val()
-    const localDate = dayjs(templateInstance.$('.js-date').val()).toDate()
-    let date = dayjs.utc(templateInstance.$('.js-date').val(), getGlobalSetting('dateformatVerbose')).isValid()
-      ? dayjs.utc(templateInstance.$('.js-date').val(), getGlobalSetting('dateformatVerbose')).toDate()
-      : dayjs.utc(`${localDate.getFullYear()}-${localDate.getMonth() + 1}-${localDate.getDate()}`).toDate() // Ensure consistent timezone usage
-    if (getGlobalSetting('useStartTime') && !templateInstance.tcid?.get()) {
-      if ($('#startTime').val()) {
-        date = dayjs(date.setHours($('#startTime').val().split(':')[0], $('#startTime').val().split(':')[1])).toDate()
-      } else {
+    const parsedDate = dayjs(
+      templateInstance.$('.js-date').val(),
+      [getGlobalSetting('dateformatVerbose'), undefined],
+    )
+    if (!parsedDate.isValid()) {
+      templateInstance.$('.js-date').addClass('is-invalid')
+      showToast(t('notifications.check_time_input'))
+      return
+    }
+    const dateOnly = parsedDate.format('YYYY-MM-DD')
+    const date = dateOnlyToUTCDate(dateOnly)
+    let startTime
+    if (getGlobalSetting('useStartTime')) {
+      startTime = templateInstance.$('#startTime').val()
+      if (!isStartTime(startTime)) {
         showToast(t('notifications.check_time_input'))
         templateInstance.$(event.currentTarget).text(buttonLabel)
         templateInstance.$(event.currentTarget).prop('disabled', false)
@@ -223,20 +244,12 @@ Template.tracktime.events({
     templateInstance.$('.js-save').text(t('navigation.saving'))
     templateInstance.$('.js-save').prop('disabled', true)
     if (templateInstance.tcid.get()) {
-      if (getGlobalSetting('useStartTime')) {
-        if (templateInstance.$('#startTime').val()) {
-          date = dayjs.utc(date.setHours(templateInstance.$('#startTime').val().split(':')[0], templateInstance.$('#startTime').val().split(':')[1])).toDate()
-        } else {
-          showToast(t('notifications.check_time_input'))
-          templateInstance.$(event.currentTarget).text(buttonLabel)
-          templateInstance.$(event.currentTarget).prop('disabled', false)
-          return
-        }
-      }
       Meteor.call('updateTimeCard', {
         _id: templateInstance.tcid.get(),
         projectId,
         date,
+        dateOnly,
+        startTime,
         hours,
         task,
         customfields,
@@ -261,7 +274,7 @@ Template.tracktime.events({
       })
     } else {
       Meteor.call('insertTimeCard', {
-        projectId, date, hours, task, customfields, user, taskRate,
+        projectId, date, dateOnly, startTime, hours, task, customfields, user, taskRate,
       }, (error) => {
         if (error) {
           console.error(error)
@@ -285,13 +298,13 @@ Template.tracktime.events({
   },
   'click .js-previous': (event, templateInstance) => {
     event.preventDefault()
-    FlowRouter.setQueryParams({ date: dayjs.utc(templateInstance.date.get()).subtract(1, 'days').format('YYYY-MM-DD') })
+    FlowRouter.setQueryParams({ date: dayjs.utc(templateInstance.date.get(), 'YYYY-MM-DD').subtract(1, 'days').format('YYYY-MM-DD') })
     templateInstance.$('#hours').val('')
     templateInstance.$('.js-tasksearch-results').addClass('d-none')
   },
   'click .js-next': (event, templateInstance) => {
     event.preventDefault()
-    FlowRouter.setQueryParams({ date: dayjs.utc(templateInstance.date.get()).add(1, 'days').format('YYYY-MM-DD') })
+    FlowRouter.setQueryParams({ date: dayjs.utc(templateInstance.date.get(), 'YYYY-MM-DD').add(1, 'days').format('YYYY-MM-DD') })
     templateInstance.$('#hours').val('')
     templateInstance.$('.js-tasksearch-results').addClass('d-none')
   },
@@ -403,9 +416,8 @@ function isEditMode() {
   || (Template.instance().data?.projectIdArg && Template.instance().data.projectIdArg.get())
 }
 Template.tracktime.helpers({
-  date: () => (Template.instance().tcid && Template.instance().tcid.get()
-    ? dayjs.utc(Template.instance().date.get()).format(getGlobalSetting('dateformatVerbose')) // Ensure consistent timezone usage
-    : dayjs.utc(Template.instance().date.get()).format(getGlobalSetting('dateformatVerbose'))),
+  date: () => dayjs.utc(Template.instance().date.get(), 'YYYY-MM-DD')
+    .format(getGlobalSetting('dateformatVerbose')),
   projectId: () => Template.instance().projectId.get(),
   reactiveProjectId: () => Template.instance().projectId,
   projectName: (_id) => (Projects.findOne({ _id }) ? Projects.findOne({ _id }).name : false),
@@ -427,13 +439,16 @@ Template.tracktime.helpers({
   showTracker: () => (getUserSetting('timeunit') !== 'd'),
   showStartTime: () => (getGlobalSetting('useStartTime')),
   totalTime: () => Template.instance().totalTime.get(),
-  previousDay: () => dayjs.utc(Template.instance().date.get()).subtract(1, 'day').format(getGlobalSetting('dateformatVerbose')),
-  nextDay: () => dayjs.utc(Template.instance().date.get()).add(1, 'day').format(getGlobalSetting('dateformatVerbose')),
+  previousDay: () => dayjs.utc(Template.instance().date.get(), 'YYYY-MM-DD').subtract(1, 'day').format(getGlobalSetting('dateformatVerbose')),
+  nextDay: () => dayjs.utc(Template.instance().date.get(), 'YYYY-MM-DD').add(1, 'day').format(getGlobalSetting('dateformatVerbose')),
   borderClass: () => (Template.instance().tcid.get()
     || (Template.instance().dat?.dateArg && Template.instance().data.dateArg.get())
     || (Template.instance().data?.projectIdArg && Template.instance().data.projectIdArg.get()) ? '' : 'tab-borders'),
   edittcid: () => Template.instance().edittcid,
-  startTime: () => dayjs(Template.instance().date.get()).format('HH:mm'),
+  startTime: () => {
+    const timecard = Timecards.findOne({ _id: Template.instance().tcid.get() })
+    return timecard ? getTimecardStartTime(timecard) : dayjs().format('HH:mm')
+  },
   customfields: () => CustomFields.find({ classname: 'time_entry' }),
   getCustomFieldValue: (fieldId) => (Template.instance().time_entry.get()
     ? Template.instance().time_entry.get()[fieldId] : false),

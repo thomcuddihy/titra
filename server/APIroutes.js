@@ -6,6 +6,12 @@ import { sanitizeObject } from '../imports/utils/sanitizer.js'
 import Timecards from '../imports/api/timecards/timecards'
 import Projects from '../imports/api/projects/projects'
 import Tasks from '../imports/api/tasks/tasks'
+import {
+  dateOnlyRange,
+  isDateOnly,
+  isStartTime,
+  parseAPITimecardDate,
+} from '../imports/utils/timecardDate.js'
 
 const taskForbiddenCustomfieldKeys = new Set([
   '_id', 'projectId', 'name', 'start', 'end', 'estimatedHours', 'dependencies', 'isDefaultTask', 'userId', 'createdAt', 'updatedAt',
@@ -87,6 +93,7 @@ async function checkProjectAccess(projectId, userId, res) {
  * @apiBody {String} projectId The project ID.
  * @apiBody {String} task The task description of the new time entry.
  * @apiBody {Date} date The date for the new time entry in format YYYY-MM-DD.
+ * @apiBody {String} [startTime] Optional local start time in HH:mm format.
  * @apiBody {Number} hours The number of hours to track.
  * @apiBody {Number} [taskRate] The rate for the task.
  * @apiBody {Object} [customfields] An object containing custom fields for the time entry.
@@ -119,10 +126,15 @@ WebApp.handlers.use('/timeentry/create/', async (req, res) => {
     sendResponse(res, 400, `Invalid JSON received. ${e}`)
   }
   if (json) {
+    let date
     try {
       check(json.projectId, String)
       check(json.task, String)
-      check(new Date(json.date), Date)
+      date = parseAPITimecardDate(json.date)
+      check(json.startTime, Match.Maybe(Match.Where(isStartTime)))
+      if (json.startTime != null && !isDateOnly(json.date)) {
+        throw new TypeError('startTime requires a YYYY-MM-DD date')
+      }
       check(json.hours, Number)
       check(json.taskRate, Match.Maybe(Number))
       check(json.customfields, Match.Maybe(Object))
@@ -135,7 +147,18 @@ WebApp.handlers.use('/timeentry/create/', async (req, res) => {
     if (!project) {
       return
     }
-    const timecardId = await insertTimeCard(json.projectId, json.task, new Date(json.date), json.hours, meteorUser._id, json.taskRate, json.customfields)
+    const dateOnly = isDateOnly(json.date) ? json.date : undefined
+    const timecardId = await insertTimeCard(
+      json.projectId,
+      json.task,
+      date,
+      json.hours,
+      meteorUser._id,
+      json.taskRate,
+      json.customfields,
+      dateOnly,
+      json.startTime,
+    )
     const payload = {}
     payload.timecardId = timecardId
     sendResponse(res, 200, 'Time entry created.', payload)
@@ -164,18 +187,21 @@ WebApp.handlers.use('/timeentry/list/', async (req, res) => {
   }
   const { pathname } = req._parsedUrl
   const url = pathname.split('/')
-  const date = new Date(url[3])
+  let startDate
+  let endDate
   try {
-    check(date, Date)
+    const range = dateOnlyRange(url[3])
+    startDate = range.startDate
+    endDate = range.endDate
   } catch (error) {
     sendResponse(res, 500, `Invalid parameters received.${error}`)
     return
   }
   const payload = await Timecards.find({
     userId: meteorUser._id,
-    date,
+    date: { $gte: startDate, $lte: endDate },
   }).fetchAsync()
-  sendResponse(res, 200, `Returning user time entries for date ${date}`, payload)
+  sendResponse(res, 200, `Returning user time entries for date ${url[3]}`, payload)
 })
 /**
   * @api {get} /timeentry/daterange/:fromDate/:toDate Get time entries for daterange
@@ -197,11 +223,12 @@ WebApp.handlers.use('/timeentry/daterange/', async (req, res) => {
   }
   const { pathname } = req._parsedUrl
   const url = pathname.split('/')
-  const fromDate = new Date(url[3])
-  const toDate = new Date(url[4])
+  let fromDate
+  let toDate
   try {
-    check(fromDate, Date)
-    check(toDate, Date)
+    const range = dateOnlyRange(url[3], url[4])
+    fromDate = range.startDate
+    toDate = range.endDate
   } catch (error) {
     sendResponse(res, 500, `Invalid parameters received.${error}`)
     return
@@ -293,12 +320,13 @@ WebApp.handlers.use('/project/timeentriesfordaterange/', async (req, res) => {
   const { pathname } = req._parsedUrl
   const url = pathname.split('/')
   const projectId = url[3]
-  const fromDate = new Date(url[4])
-  const toDate = new Date(url[5])
+  let fromDate
+  let toDate
   try {
     check(projectId, String)
-    check(fromDate, Date)
-    check(toDate, Date)
+    const range = dateOnlyRange(url[4], url[5])
+    fromDate = range.startDate
+    toDate = range.endDate
   } catch (error) {
     sendResponse(res, 500, `Invalid parameters received.${error}`)
     return

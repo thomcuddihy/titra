@@ -439,6 +439,7 @@
     "siwapp_configuration": "Debes configurar la integración con Siwapp para usar esta función.",
     "time_entry_deleted": "Entrada de tiempo eliminada",
     "time_entry_updated": "Entrada de tiempo actualizada",
+    "week_aggregate_edit_conflict": "Esta celda semanal combina varias entradas de tiempo y no se puede editar como una sola. Edite las entradas individualmente en la vista Día o Detalles.",
     "time_entry_saved": "Entrada de tiempo guardada",
     "delete_confirm": "La eliminación no se puede deshacer, ¿quieres continuar?",
     "project_update_success": "Proyecto actualizado",

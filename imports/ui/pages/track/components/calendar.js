@@ -13,12 +13,17 @@ import 'fullcalendar/themes/classic/theme.css'
 import 'fullcalendar/themes/classic/palette.css'
 import { getUserSetting } from '../../../../utils/frontend_helpers.js'
 import { getHolidays } from '../../../../utils/holiday.js'
+import {
+  dateOnlyFromLocalDate,
+  getTimecardDateOnly,
+} from '../../../../utils/timecardDate.js'
 
 Template.calendar.onCreated(function calendarCreated() {
   dayjs.extend(utc)
   this.subscribe('myprojects', {})
-  this.startDate = new ReactiveVar(dayjs.utc().startOf('month').toDate()) // Ensure consistent timezone usage
-  this.endDate = new ReactiveVar(dayjs.utc().endOf('month').toDate()) // Ensure consistent timezone usage
+  const today = dayjs.utc(dateOnlyFromLocalDate(new Date()), 'YYYY-MM-DD')
+  this.startDate = new ReactiveVar(today.startOf('month').toDate())
+  this.endDate = new ReactiveVar(today.endOf('month').toDate())
   this.tcid = new ReactiveVar()
   this.selectedProjectId = new ReactiveVar()
   this.selectedDate = new ReactiveVar()
@@ -52,6 +57,7 @@ Template.calendar.onRendered(() => {
         aspectRatio: 2,
         height: 'auto',
         timeZone: 'UTC', // Ensure consistent timezone usage
+        now: dateOnlyFromLocalDate(new Date()),
         firstDay: getUserSetting('startOfWeek'),
         themeSystem: 'classic',
         buttonIcons: false,
@@ -69,7 +75,7 @@ Template.calendar.onRendered(() => {
             {
               id: it._id,
               title: it.task,
-              start: it.date,
+              start: getTimecardDateOnly(it),
               allDay: true,
               backgroundColor: hex2rgba(Projects.findOne({ _id: it.projectId }).color ? Projects.findOne({ _id: it.projectId }).color : '#009688', 100),
               borderColor: 'rgba(255, 255, 255, 0)',
@@ -110,7 +116,7 @@ Template.calendar.onRendered(() => {
         },
         drop: function dropEvent(dropInfo) {
           templateInstance.tcid.set(undefined)
-          templateInstance.selectedDate.set(dropInfo.date)
+          templateInstance.selectedDate.set(dropInfo.dateStr)
           templateInstance.selectedProjectId.set($(dropInfo.draggedEl).data('project'))
           new Modal($('#edit-tc-entry-modal')[0], { focus: false }).show()
         },
@@ -125,7 +131,7 @@ Template.calendar.onRendered(() => {
         dateClick: (dateClickInfo) => {
           templateInstance.tcid.set(undefined)
           templateInstance.selectedProjectId.set('all')
-          templateInstance.selectedDate.set(dateClickInfo.date)
+          templateInstance.selectedDate.set(dateClickInfo.dateStr)
           new Modal($('#edit-tc-entry-modal')[0], { focus: false }).show()
         },
         datesSet: (dateInfo) => {

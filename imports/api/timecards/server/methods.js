@@ -22,10 +22,79 @@ import {
   calculateSimilarity,
 } from '../../../utils/server_method_helpers.js'
 import { getOpenAIResponse } from '../../../utils/openai/openai_server.js'
+import {
+  buildTimecardDateFields,
+  dateOnlyFromUTCDate,
+  dateOnlyRange,
+  isDateOnly,
+  isStartTime,
+  timecardDateAggregationExpression,
+} from '../../../utils/timecardDate.js'
+import { timecardDateStateSelector } from '../../../utils/timecardRevision.js'
 
 const timeEntryForbiddenCustomfieldKeys = new Set([
-  '_id', 'userId', 'projectId', 'date', 'hours', 'task', 'taskRate', 'state', 'lastUsed', 'name', 'createdAt', 'updatedAt',
+  '_id', 'userId', 'projectId', 'date', 'dateOnly', 'startTime', 'dateRevision',
+  'hours', 'task', 'taskRate', 'state', 'lastUsed', 'name', 'createdAt', 'updatedAt',
 ])
+
+function assertTimecardWriteSucceeded(result) {
+  const affectedCount = result?.matchedCount != null
+    ? result.matchedCount + (result.upsertedCount || 0)
+    : result?.deletedCount ?? result
+  if (affectedCount !== 1) {
+    throw new Meteor.Error(
+      'timecard-write-conflict',
+      'The time entry changed while it was being saved. Reload and try again.',
+    )
+  }
+}
+
+function assertModernTimecardDatePayload(dateOnly) {
+  if (!isDateOnly(dateOnly)) {
+    throw new Meteor.Error(
+      'timecard-date-fields-required',
+      'This date format is outdated. Reload the page before saving the time entry.',
+    )
+  }
+}
+
+function assertBulkTimecardDatePayload({
+  dateOnly, startTime, preserveLegacyTimestamp,
+}) {
+  const hasModernDate = isDateOnly(dateOnly) && preserveLegacyTimestamp !== true
+  const hasExplicitLegacyDate = preserveLegacyTimestamp === true
+    && dateOnly == null
+    && startTime == null
+  if (!hasModernDate && !hasExplicitLegacyDate) {
+    throw new Meteor.Error(
+      'timecard-date-fields-required',
+      'This date format is outdated. Reload the page before saving the time entry.',
+    )
+  }
+}
+
+async function buildWeekTimecardContext(projectId, task, date, userId, dateOnly) {
+  const normalizedDateOnly = dateOnly || dateOnlyFromUTCDate(date)
+  const dateFields = buildTimecardDateFields(date, normalizedDateOnly)
+  const { startDate, endDate } = dateOnlyRange(normalizedDateOnly)
+  const taskName = await emojify(task)
+  return {
+    dateFields,
+    taskName,
+    selector: {
+      userId,
+      projectId,
+      date: { $gte: startDate, $lte: endDate },
+      task: taskName,
+    },
+  }
+}
+
+function assertWeekCellIsUnambiguous(matchingTimecards) {
+  if (matchingTimecards.length > 1) {
+    throw new Meteor.Error('notifications.week_aggregate_edit_conflict')
+  }
+}
 
 /**
  * Inserts a new timecard into the Timecards collection.
@@ -45,8 +114,9 @@ const timeEntryForbiddenCustomfieldKeys = new Set([
  * @throws {Meteor.Error} If time entry rule is not a valid JavaScript expression.
  */
 async function checkTimeEntryRule({
-  userId, projectId, task, state, date, hours,
+  userId, projectId, task, state, date, dateOnly, startTime, hours,
 }) {
+  const dateFields = buildTimecardDateFields(date, dateOnly, startTime)
   const meteorUser = await Meteor.users.findOneAsync({ _id: userId })
   const vm = new NodeVM({
     wrapper: 'none',
@@ -60,7 +130,7 @@ async function checkTimeEntryRule({
         projectId,
         task,
         state,
-        date,
+        ...dateFields,
         hours,
       },
     },
@@ -88,13 +158,24 @@ async function checkTimeEntryRule({
  * @throws {Meteor.Error} If time entry rule fails.
  * @throws {Meteor.Error} If time entry rule throws an error.
  */
-async function insertTimeCard(projectId, task, date, hours, userId, taskRate, customfields) {
+async function insertTimeCard(
+  projectId,
+  task,
+  date,
+  hours,
+  userId,
+  taskRate,
+  customfields,
+  dateOnly,
+  startTime,
+) {
   const safeCustomfields = sanitizeObject(customfields, timeEntryForbiddenCustomfieldKeys)
   const newTimeCard = {
     ...safeCustomfields,
     userId,
     projectId,
-    date,
+    ...buildTimecardDateFields(date, dateOnly, startTime),
+    dateRevision: 0,
     hours,
     task: await emojify(task),
   }
@@ -126,55 +207,71 @@ async function insertTimeCard(projectId, task, date, hours, userId, taskRate, cu
  * @returns {String} 'notifications.success' if successful
  * @throws {Meteor.Error} If time entry rule fails.
  */
-async function upsertTimecard(projectId, task, date, hours, userId) {
-  if (!await Tasks.findOneAsync({ userId, name: await emojify(task) })) {
-    await Tasks.insertAsync({ userId, lastUsed: new Date(), name: await emojify(task) })
+async function upsertTimecard(projectId, task, date, hours, userId, dateOnly) {
+  const { dateFields, taskName, selector } = await buildWeekTimecardContext(
+    projectId,
+    task,
+    date,
+    userId,
+    dateOnly,
+  )
+  const matchingTimecards = await Timecards.find(selector, {
+    sort: { _id: 1 },
+    limit: 2,
+  }).fetchAsync()
+  assertWeekCellIsUnambiguous(matchingTimecards)
+
+  if (!await Tasks.findOneAsync({ userId, name: taskName })) {
+    await Tasks.insertAsync({ userId, lastUsed: new Date(), name: taskName })
   } else {
     await Tasks.updateAsync(
-      { userId, name: await emojify(task) },
+      { userId, name: taskName },
       { $set: { lastUsed: new Date() } },
     )
   }
   if (hours === 0) {
-    await Timecards.removeAsync({
-      userId,
-      projectId,
-      date,
-      task: await emojify(task),
-    })
-  } else if (await Timecards.find({
-    userId,
-    projectId,
-    date,
-    task: await emojify(task),
-  }).countAsync() > 1) {
-    // if there are more time entries with the same task description for one day,
-    // we remove all of them and create a new entry for the total sum
-    await Timecards.removeAsync({
-      userId,
-      projectId,
-      date,
-      task: await emojify(task),
-    })
-  }
-  if (hours !== 0) {
-    await Timecards.updateAsync(
+    if (matchingTimecards.length === 1) {
+      const removed = await Timecards.rawCollection().deleteOne(
+        timecardDateStateSelector(matchingTimecards[0]),
+      )
+      assertTimecardWriteSucceeded(removed)
+    }
+  } else if (matchingTimecards.length === 1) {
+    // A legacy entry may encode its start time in date. A week-cell edit must
+    // not destroy that timestamp while its original timezone remains unknown.
+    const fieldsForUpdate = isDateOnly(matchingTimecards[0].dateOnly)
+      ? dateFields
+      : {}
+    const updated = await Timecards.rawCollection().updateOne(
+      timecardDateStateSelector(matchingTimecards[0]),
       {
-        userId,
-        projectId,
-        date,
-        task: await emojify(task),
+        $set: {
+          userId,
+          projectId,
+          ...fieldsForUpdate,
+          hours,
+          task: taskName,
+        },
+        $inc: { dateRevision: 1 },
       },
+    )
+    assertTimecardWriteSucceeded(updated)
+  } else {
+    const updated = await Timecards.rawCollection().updateOne(
+      selector,
       {
-        userId,
-        projectId,
-        date,
-        hours,
-        task: await emojify(task),
+        $set: {
+          userId,
+          projectId,
+          ...dateFields,
+          hours,
+          task: taskName,
+        },
+        $inc: { dateRevision: 1 },
       },
-
       { upsert: true },
     )
+    assertTimecardWriteSucceeded(updated)
   }
   return 'notifications.success'
 }
@@ -215,23 +312,36 @@ const insertTimeCardMethod = new ValidatedMethod({
     check(args.projectId, Match.Maybe(String))
     check(args.task, String)
     check(args.date, Date)
+    check(args.dateOnly, Match.Maybe(Match.Where(isDateOnly)))
+    check(args.startTime, Match.Maybe(Match.Where(isStartTime)))
     check(args.hours, Number)
     check(args.taskRate, Match.Maybe(Number))
     check(args.customfields, Match.Maybe(Object))
     check(args.user, String)
+    assertModernTimecardDatePayload(args.dateOnly)
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({
-    projectId, task, date, hours, taskRate, customfields, user,
+    projectId, task, date, dateOnly, startTime, hours, taskRate, customfields, user,
   }) {
     let { userId } = this
     if (user !== userId) {
       userId = await checkProjectAdministratorAndUser(projectId, userId, user)
     }
-    const check = await checkTimeEntryRule({
-      userId, projectId, task, state: 'new', date, hours,
+    await checkTimeEntryRule({
+      userId, projectId, task, state: 'new', date, dateOnly, startTime, hours,
     })
-    insertTimeCard(projectId, task, date, hours, userId, taskRate, customfields)
+    return insertTimeCard(
+      projectId,
+      task,
+      date,
+      hours,
+      userId,
+      taskRate,
+      customfields,
+      dateOnly,
+      startTime,
+    )
   },
 })
 /**
@@ -252,30 +362,52 @@ const upsertWeek = new ValidatedMethod({
   name: 'upsertWeek',
   validate(args) {
     check(args, Array)
-  },
-  mixins: [authenticationMixin, transactionLogMixin],
-  async run(weekArray) {
-    weekArray.forEach(async (element) => {
+    args.forEach((element) => {
       check(element.projectId, String)
       check(element.task, String)
       check(element.date, Date)
+      check(element.dateOnly, Match.Maybe(Match.Where(isDateOnly)))
       check(element.hours, Number)
-      await checkTimeEntryRule({
-        userId: this.userId,
-        projectId: element.projectId,
-        task: element.task,
-        state: 'new',
-        date: element.date,
-        hours: element.hours,
-      })
+      assertModernTimecardDatePayload(element.dateOnly)
+    })
+  },
+  mixins: [authenticationMixin, transactionLogMixin],
+  async run(weekArray) {
+    await Promise.all(weekArray.map(async (element) => {
+      const { selector } = await buildWeekTimecardContext(
+        element.projectId,
+        element.task,
+        element.date,
+        this.userId,
+        element.dateOnly,
+      )
+      const matchingTimecards = await Timecards.find(selector, {
+        fields: { _id: 1 },
+        limit: 2,
+      }).fetchAsync()
+      assertWeekCellIsUnambiguous(matchingTimecards)
+    }))
+    await Promise.all(weekArray.map((element) => checkTimeEntryRule({
+      userId: this.userId,
+      projectId: element.projectId,
+      task: element.task,
+      state: 'new',
+      date: element.date,
+      dateOnly: element.dateOnly,
+      hours: element.hours,
+    })))
+    for (const element of weekArray) {
+      // Keep duplicate cells in one request ordered so the revision check cannot race itself.
+      // eslint-disable-next-line no-await-in-loop
       await upsertTimecard(
         element.projectId,
         element.task,
         element.date,
         element.hours,
         this.userId,
+        element.dateOnly,
       )
-    })
+    }
   },
 })
 /**
@@ -300,6 +432,8 @@ const updateTimeCard = new ValidatedMethod({
     check(args._id, String)
     check(args.task, String)
     check(args.date, Date)
+    check(args.dateOnly, Match.Maybe(Match.Where(isDateOnly)))
+    check(args.startTime, Match.Maybe(Match.Where(isStartTime)))
     check(args.hours, Number)
     check(args.taskRate, Match.Maybe(Number))
     check(args.customfields, Match.Maybe(Object))
@@ -307,15 +441,18 @@ const updateTimeCard = new ValidatedMethod({
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({
-    projectId, _id, task, date, hours, taskRate, customfields, user,
+    projectId, _id, task, date, dateOnly, startTime, hours, taskRate, customfields, user,
   }) {
     let { userId } = this
     if (user !== userId) {
       userId = await checkProjectAdministratorAndUser(projectId, userId, user)
     }
     const timecard = await Timecards.findOneAsync({ _id })
+    if (isDateOnly(timecard?.dateOnly) && !isDateOnly(dateOnly)) {
+      assertModernTimecardDatePayload(dateOnly)
+    }
     await checkTimeEntryRule({
-      userId, projectId, task, state: timecard.state, date, hours,
+      userId, projectId, task, state: timecard.state, date, dateOnly, startTime, hours,
     })
     const safeCustomfields = sanitizeObject(customfields, timeEntryForbiddenCustomfieldKeys)
     if (!await Tasks.findOneAsync({ userId, name: await emojify(task) })) {
@@ -324,21 +461,24 @@ const updateTimeCard = new ValidatedMethod({
     const fieldsToSet = {
       ...safeCustomfields,
       projectId,
-      date,
+      ...buildTimecardDateFields(date, dateOnly, startTime),
       hours,
       task: await emojify(task),
     }
+    const modifier = {
+      $set: fieldsToSet,
+      $inc: { dateRevision: 1 },
+    }
     if (taskRate) {
       fieldsToSet.taskRate = taskRate
-      await Timecards.updateAsync({ _id }, {
-        $set: fieldsToSet,
-      })
     } else {
-      await Timecards.updateAsync({ _id }, {
-        $set: fieldsToSet,
-        $unset: { taskRate: '' },
-      })
+      modifier.$unset = { taskRate: '' }
     }
+    const result = await Timecards.rawCollection().updateOne(
+      timecardDateStateSelector(timecard),
+      modifier,
+    )
+    assertTimecardWriteSucceeded(result)
   },
 })
 /**
@@ -367,9 +507,16 @@ const deleteTimeCard = new ValidatedMethod({
       task: timecard.task,
       state: timecard.state,
       date: timecard.date,
+      dateOnly: timecard.dateOnly,
+      startTime: timecard.startTime,
       hours: timecard.hours,
     })
-    return Timecards.removeAsync({ userId: this.userId, _id: timecardId })
+    const result = await Timecards.rawCollection().deleteOne({
+      ...timecardDateStateSelector(timecard),
+      userId: this.userId,
+    })
+    assertTimecardWriteSucceeded(result)
+    return result.deletedCount
   },
 })
 /**
@@ -702,17 +849,30 @@ const deleteTimeCardsForWeek = new ValidatedMethod({
       task: String,
       startDate: Date,
       endDate: Date,
+      startDateOnly: Match.Maybe(Match.Where(isDateOnly)),
+      endDateOnly: Match.Maybe(Match.Where(isDateOnly)),
     })
+    assertModernTimecardDatePayload(args.startDateOnly)
+    assertModernTimecardDatePayload(args.endDateOnly)
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({
-    projectId, task, startDate, endDate,
+    projectId, task, startDateOnly, endDateOnly,
   }) {
-    await Timecards.removeAsync({
+    const { startDate, endDate } = dateOnlyRange(startDateOnly, endDateOnly)
+    const matchingTimecards = await Timecards.find({
       projectId,
       task,
       date: { $gte: startDate, $lte: endDate },
-    })
+    }, { sort: { _id: 1 } }).fetchAsync()
+    for (const timecard of matchingTimecards) {
+      // Delete the captured revisions in order so a concurrent edit reliably aborts the batch.
+      // eslint-disable-next-line no-await-in-loop
+      const result = await Timecards.rawCollection().deleteOne(
+        timecardDateStateSelector(timecard),
+      )
+      assertTimecardWriteSucceeded(result)
+    }
   },
 })
 
@@ -944,7 +1104,7 @@ const getTotalForWeekPerDay = new ValidatedMethod({
       },
       {
         $group: {
-          _id: { date: '$date' },
+          _id: { date: timecardDateAggregationExpression() },
           totalForDate: { $sum: '$hours' },
         },
       }]).toArray()
@@ -1009,10 +1169,14 @@ const bulkInsertTimecards = new ValidatedMethod({
         projectId: String,
         task: String,
         date: Date,
+        dateOnly: Match.Maybe(Match.Where(isDateOnly)),
+        startTime: Match.Maybe(Match.Where(isStartTime)),
+        preserveLegacyTimestamp: Match.Maybe(Boolean),
         hours: Number,
         userId: Match.Maybe(String), // Optional userId
         customfields: Match.Maybe(Object), // Optional custom fields
       })
+      assertBulkTimecardDatePayload(timecard)
     })
   },
   mixins: [authenticationMixin, transactionLogMixin],
@@ -1022,19 +1186,34 @@ const bulkInsertTimecards = new ValidatedMethod({
       const userId = timecard.userId || this.userId
       // Use provided userId or fallback to the current user
       const {
-        projectId, task, date, hours, customfields,
+        projectId, task, date, dateOnly, startTime, hours, customfields,
       } = timecard
       // Check time entry rules
+      // Preserve the existing all-or-error order for CSV bulk imports.
+      // eslint-disable-next-line no-await-in-loop
       await checkTimeEntryRule({
         userId,
         projectId,
         task,
         state: 'new',
         date,
+        dateOnly,
+        startTime,
         hours,
       })
       // Insert the timecard
-      const timecardId = await insertTimeCard(projectId, task, date, hours, userId, null, customfields)
+      // eslint-disable-next-line no-await-in-loop
+      const timecardId = await insertTimeCard(
+        projectId,
+        task,
+        date,
+        hours,
+        userId,
+        null,
+        customfields,
+        dateOnly,
+        startTime,
+      )
       insertedTimecards.push(timecardId)
     }
     return {

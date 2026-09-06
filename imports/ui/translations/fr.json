@@ -439,6 +439,7 @@
     "siwapp_configuration": "Vous devez configurer l'intégration Siwapp pour utiliser cette fonctionnalité",
     "time_entry_deleted": "Entrée de temps supprimée",
     "time_entry_updated": "Entrée de temps mise à jour",
+    "week_aggregate_edit_conflict": "Cette cellule hebdomadaire regroupe plusieurs entrées de temps et ne peut pas être modifiée comme une seule. Modifiez les entrées individuellement dans la vue Jour ou Détails.",
     "time_entry_saved": "Entrée de temps sauvegardée",
     "delete_confirm": "La suppression ne peut être annulée, voulez-vous continuer?",
     "project_update_success": "Projet mis à jour",

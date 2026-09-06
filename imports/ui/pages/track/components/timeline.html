@@ -15,7 +15,7 @@
                     <th scope="row">
                     {{formatDate date}}
                     <br/>
-                    <button data-date={{date}} class="js-add-time-entry-date btn btn-sm btn-reveal"><i class="fa fa-plus"></i> {{t "project.add"}}</button>
+                    <button data-date-only="{{dateOnly date}}" class="js-add-time-entry-date btn btn-sm btn-reveal"><i class="fa fa-plus"></i> {{t "project.add"}}</button>
                     </th>
                     {{#each project in projectList}}
                         <td style="max-width:5rem; transition: width 2s;" class="overflow-hidden">
@@ -23,7 +23,7 @@
                                 <span data-tcid="{{entry._id}}" class="badge js-edit-time-entry" style="background-color:{{getProjectColor project}};cursor:pointer;">{{entry.task}} ({{entry.hours}})</span>
                                 <br/>
                             {{/each}}
-                            <button data-projectid="{{project}}" data-date="{{date}}" class="btn btn-sm btn-reveal js-add-time-entry-project"><i class="fa fa-plus"></i> {{t "project.add"}}</button>
+                            <button data-projectid="{{project}}" data-date-only="{{dateOnly date}}" class="btn btn-sm btn-reveal js-add-time-entry-project"><i class="fa fa-plus"></i> {{t "project.add"}}</button>
                         </td>
                     {{/each}}
                 </tr>
