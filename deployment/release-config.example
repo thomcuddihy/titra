@@ -1,0 +1,15 @@
+# Illustrative values only. Pass reviewed values as build-v7-release.sh options.
+EXPECTED_HOST_FQDN=titra.example.invalid
+PRODUCTION_COMPOSE_FILE=/srv/titra/docker-compose.yml
+INSTALL_ROOT=/opt/titra-maintenance-r7
+STATE_ROOT=/var/lib/titra-maintenance
+BACKUP_ROOT=/var/backups/titra-maintenance
+LOCK_DIR=/run/titra-maintenance
+INCOMING_DIR=/srv/titra-maintenance/incoming
+CONSOLE_INSTALL_DIR=/opt/titra-maintenance-console-r7
+COMPOSE_PROJECT=titra
+APP_SERVICE=titra
+DB_SERVICE=mongodb
+APP_CONTAINER=titra_app
+DB_CONTAINER=titra_db
+DATABASE=titra

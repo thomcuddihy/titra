@@ -1,0 +1,13 @@
+# Release builders deliberately write immutable artifacts below deployment/.
+# Keep generated bundles, image archives, logs, and verification evidence out
+# of source control.
+dist-*/
+test-artifacts/
+verification-*/
+**/__pycache__/
+*.py[cod]
+*.log
+*.tar
+*.tar.gz
+*.sha256
+*.receipt

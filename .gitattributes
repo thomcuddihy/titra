@@ -1,0 +1,12 @@
+/.gitattributes text eol=lf
+deployment/.gitignore text eol=lf
+deployment/**/*.sh text eol=lf
+deployment/**/*.sh.in text eol=lf
+deployment/**/*.mjs text eol=lf
+deployment/**/*.cjs text eol=lf
+deployment/**/*.js text eol=lf
+deployment/**/*.py text eol=lf
+deployment/**/*.yml text eol=lf
+deployment/**/*.md text eol=lf
+deployment/**/*.env.in text eol=lf
+deployment/**/*.example text eol=lf
