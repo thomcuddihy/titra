@@ -52,7 +52,9 @@ test('templates contain no rendered host, personal path, image ID, or fork ident
   const checks = [
     /github[.]com\/(?!titraio\/titra(?:[/'"\s]|$))/iu,
     /(?:\/home\/|[A-Za-z]:\\Users\\)[A-Za-z0-9._-]+/u,
-    /sha256:[0-9a-f]{64}/u,
+    // A public image reference pinned as `name@sha256:...` is source policy,
+    // not a host-local image ID. Bare Docker image IDs remain forbidden.
+    /(?<!@)sha256:[0-9a-f]{64}/u,
   ]
   for (const path of filesBelow(deploymentRoot)) {
     if (path === self || /test_verify_docker_save_archive[.]py$/u.test(path)) continue
