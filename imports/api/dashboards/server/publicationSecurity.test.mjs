@@ -45,6 +45,17 @@ test('dashboard client documents never contain hashes or internal authorization 
   assert.equal(fields.unexpectedFutureSecret, undefined)
 })
 
+test('dashboard client requests the project name through the password-scoped publication', () => {
+  const source = readFileSync(
+    new URL('../../../ui/pages/details/dashboard.js', import.meta.url),
+    'utf8',
+  )
+  assert.match(source, /subscribe\('dashboardProjectName',\s*\{/u)
+  assert.match(source, /dashboardId:\s*dashboard\._id/u)
+  assert.match(source, /password:\s*this\.password\.get\(\) \|\| ''/u)
+  assert.doesNotMatch(source, /subscribe\('publicProjectName'/u)
+})
+
 test('public dashboard timecards use the public projection only', () => {
   const safe = safeTimecardDocuments(new Map([['timecard', {
     _id: 'timecard',

@@ -101,7 +101,10 @@ Template.dashboard.onCreated(function dashboardCreated() {
           // Done subscription, fetch timecards and project name
           const dashboard = Dashboards.findOne({projectId: {$exists: true }});
           if (handleDetails && handleDetails.ready()) {
-            this.subscribe('publicProjectName', dashboard.projectId)
+            this.subscribe('dashboardProjectName', {
+              dashboardId: dashboard._id,
+              password: this.password.get() || '',
+            })
             this.subscribe('dashboardTimecardsById',dashboard._id,this.password.get(), {
               onStop: function(error) {
                 if (error) {
