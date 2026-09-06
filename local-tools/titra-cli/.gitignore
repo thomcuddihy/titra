@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 *.egg-info/
+.titra-cli.toml
 .coverage
 .coverage.*
 .mypy_cache/
