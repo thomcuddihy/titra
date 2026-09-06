@@ -2,6 +2,44 @@ import { ValidatedMethod } from 'meteor/mdg:validated-method'
 import { check, Match } from 'meteor/check'
 import { Accounts } from 'meteor/accounts-base'
 import { authenticationMixin, adminAuthenticationMixin, transactionLogMixin } from '../../../utils/server_method_helpers.js'
+import {
+  getTimerState,
+  startTimerAtomic,
+  stopTimerAtomic,
+} from './timerTransitions.js'
+import { tokenHashDocument } from '../../../../server/apiTokenSecurity.js'
+
+function timerDependencies(now) {
+  return {
+    findUser: (selector) => Meteor.users.findOneAsync(selector),
+    updateOne: (selector, modifier) => Meteor.users.rawCollection().updateOne(selector, modifier),
+    ...(now ? { now } : {}),
+  }
+}
+
+function validateTimerMetadata({ project, task, startTime, customFields }) {
+  for (const value of [project, task, startTime]) {
+    if (value != null && (typeof value !== 'string' || value.length > 10000)) {
+      throw new Meteor.Error('timer-invalid')
+    }
+  }
+  if (customFields != null) {
+    if (!Array.isArray(customFields) || customFields.length > 100
+      || JSON.stringify(customFields).length > 100000) throw new Meteor.Error('timer-invalid')
+  }
+}
+
+function getAPITimer(userId) {
+  return getTimerState({ userId }, timerDependencies())
+}
+
+function startAPITimer(userId, operationId) {
+  return startTimerAtomic({ userId, operationId }, timerDependencies())
+}
+
+function stopAPITimer(userId, timerId, expectedRevision) {
+  return stopTimerAtomic({ userId, timerId, expectedRevision }, timerDependencies())
+}
 
 /**
  * Updates a user's settings.
@@ -78,34 +116,59 @@ const updateSettings = new ValidatedMethod({
     theme,
     language,
   }) {
-    await Meteor.users.updateAsync({ _id: this.userId }, {
-      $set: {
-        'profile.unit': unit,
-        'profile.startOfWeek': startOfWeek,
-        'profile.timeunit': timeunit,
-        'profile.timetrackview': timetrackview,
-        'profile.enableWekan': enableWekan,
-        'profile.hoursToDays': hoursToDays,
-        'profile.precision': precision,
-        'profile.siwapptoken': siwapptoken,
-        'profile.siwappurl': siwappurl,
-        'profile.APItoken': APItoken,
-        'profile.holidayCountry': holidayCountry,
-        'profile.holidayState': holidayState,
-        'profile.holidayRegion': holidayRegion,
-        'profile.dailyStartTime': dailyStartTime,
-        'profile.breakStartTime': breakStartTime,
-        'profile.breakDuration': breakDuration,
-        'profile.regularWorkingTime': regularWorkingTime,
-        'profile.zammadtoken': zammadtoken,
-        'profile.zammadurl': zammadurl,
-        'profile.gitlabtoken': gitlabtoken,
-        'profile.gitlaburl': gitlaburl,
-        'profile.rounding': rounding,
-        'profile.theme': theme,
-        'profile.language': language,
-      },
-    })
+    const ordinarySettings = {
+      'profile.unit': unit,
+      'profile.startOfWeek': startOfWeek,
+      'profile.timeunit': timeunit,
+      'profile.timetrackview': timetrackview,
+      'profile.enableWekan': enableWekan,
+      'profile.hoursToDays': hoursToDays,
+      'profile.precision': precision,
+      'profile.siwapptoken': siwapptoken,
+      'profile.siwappurl': siwappurl,
+      'profile.holidayCountry': holidayCountry,
+      'profile.holidayState': holidayState,
+      'profile.holidayRegion': holidayRegion,
+      'profile.dailyStartTime': dailyStartTime,
+      'profile.breakStartTime': breakStartTime,
+      'profile.breakDuration': breakDuration,
+      'profile.regularWorkingTime': regularWorkingTime,
+      'profile.zammadtoken': zammadtoken,
+      'profile.zammadurl': zammadurl,
+      'profile.gitlabtoken': gitlabtoken,
+      'profile.gitlaburl': gitlaburl,
+      'profile.rounding': rounding,
+      'profile.theme': theme,
+      'profile.language': language,
+    }
+    const modifier = {
+      $set: ordinarySettings,
+    }
+    if (typeof APItoken === 'string' && APItoken.trim()) {
+      try {
+        modifier.$set['services.titraApiToken'] = tokenHashDocument(APItoken)
+        modifier.$unset = { 'profile.APItoken': '' }
+      } catch (error) {
+        if (error instanceof TypeError) {
+          throw new Meteor.Error(
+            'api-token-invalid',
+            'API tokens must be 16-512 URL-safe characters.',
+          )
+        }
+        throw error
+      }
+    }
+    try {
+      await Meteor.users.updateAsync({ _id: this.userId }, modifier)
+    } catch (error) {
+      if (error?.code === 11000) {
+        throw new Meteor.Error(
+          'api-token-in-use',
+          'That API token is already assigned to another user.',
+        )
+      }
+      throw error
+    }
   },
 })
 
@@ -358,41 +421,46 @@ const setCustomPeriodDates = new ValidatedMethod({
 const setTimer = new ValidatedMethod({
   name: 'setTimer',
   validate(args) {
-    check(args.timestamp, Match.Maybe(Date))
-    check(args.project, Match.Maybe(String))
-    check(args.task, Match.Maybe(String))
-    check(args.startTime, Match.Maybe(String))
-    check(args.customFields, Match.Maybe(Array))
+    check(args, {
+      timestamp: Match.Maybe(Date),
+      operationId: Match.Maybe(String),
+      timerId: Match.Maybe(String),
+      expectedRevision: Match.Maybe(Number),
+      project: Match.Maybe(String),
+      task: Match.Maybe(String),
+      startTime: Match.Maybe(String),
+      customFields: Match.Maybe(Array),
+    })
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({
-    timestamp, project, task, startTime, customFields,
+    timestamp, operationId, timerId, expectedRevision,
+    project, task, startTime, customFields,
   }) {
-    if (!timestamp) {
-      await Meteor.users.updateAsync({ _id: this.userId }, { $unset: { 'profile.timer': '' } })
-    } else {
-      await Meteor.users.updateAsync({ _id: this.userId }, { $set: { 'profile.timer': timestamp } })
+    if (timestamp) {
+      if (timerId != null || expectedRevision != null) throw new Meteor.Error('timer-invalid')
+      validateTimerMetadata({ project, task, startTime, customFields })
+      const result = await startTimerAtomic({
+        userId: this.userId,
+        operationId: operationId || `ddp:${Random.id()}`,
+        metadata: { project, task, startTime, customFields },
+      }, timerDependencies(() => timestamp))
+      return result.payload
     }
-    if (!project) {
-      await Meteor.users.updateAsync({ _id: this.userId }, { $unset: { 'profile.timer_project': '' } })
-    } else {
-      await Meteor.users.updateAsync({ _id: this.userId }, { $set: { 'profile.timer_project': project } })
-    }
-    if (!task) {
-      await Meteor.users.updateAsync({ _id: this.userId }, { $unset: { 'profile.timer_task': '' } })
-    } else {
-      await Meteor.users.updateAsync({ _id: this.userId }, { $set: { 'profile.timer_task': task } })
-    }
-    if (!customFields) {
-      await Meteor.users.updateAsync({ _id: this.userId }, { $unset: { 'profile.timer_custom_fields': '' } })
-    } else {
-      await Meteor.users.updateAsync({ _id: this.userId }, { $set: { 'profile.timer_custom_fields': customFields } })
-    }
-    if (!startTime) {
-      await Meteor.users.updateAsync({ _id: this.userId }, { $unset: { 'profile.timer_start_time': '' } })
-    } else {
-      await Meteor.users.updateAsync({ _id: this.userId }, { $set: { 'profile.timer_start_time': startTime } })
-    }
+    if (operationId != null || project != null || task != null
+      || startTime != null || customFields != null) throw new Meteor.Error('timer-invalid')
+    const user = await Meteor.users.findOneAsync({ _id: this.userId })
+    const resolvedTimerId = timerId === undefined ? (user?.profile?.timerId ?? null) : timerId
+    const resolvedRevision = expectedRevision === undefined
+      ? (Object.prototype.hasOwnProperty.call(user?.profile || {}, 'timerRevision')
+        ? user.profile.timerRevision : null)
+      : expectedRevision
+    const result = await stopTimerAtomic({
+      userId: this.userId,
+      timerId: resolvedTimerId,
+      expectedRevision: resolvedRevision,
+    }, timerDependencies())
+    return result.payload
   },
 })
 /**
@@ -485,7 +553,13 @@ const getUserVerificationUrl = new ValidatedMethod({
 
     // Get the webhook interface configuration
     const WebhookVerification = (await import('../../webhookverification/webhookverification.js')).default
-    const webhookInterface = await WebhookVerification.findOneAsync({ _id: webhookInterfaceId, active: true })
+    const webhookInterface = await WebhookVerification.findOneAsync({
+      _id: webhookInterfaceId,
+      active: true,
+      securityVersion: 2,
+      mappingVersion: 1,
+      removedAt: { $exists: false },
+    })
     
     if (!webhookInterface) {
       throw new Meteor.Error('webhook-not-found', 'Associated webhook verification interface not found or inactive')
@@ -513,6 +587,9 @@ export {
   adminToggleUserState,
   setCustomPeriodDates,
   setTimer,
+  getAPITimer,
+  startAPITimer,
+  stopAPITimer,
   updateProfile,
   updateSettings,
   resetUserSettings,

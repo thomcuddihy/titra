@@ -1,6 +1,7 @@
 import { Meteor } from 'meteor/meteor'
 import { Template } from 'meteor/templating'
 import { ReactiveVar } from 'meteor/reactive-var'
+import { Random } from 'meteor/random'
 import dayjs from 'dayjs'
 import preciseDiff from 'dayjs-precise-range'
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra'
@@ -102,12 +103,25 @@ Template.timetracker.events({
     if (task) {
       $('.js-tasksearch-input').val(task)
     }
-    Meteor.clearTimeout(templateInstance.intervalHandle)
-    templateInstance.intervalHandle = undefined
-    Meteor.call('setTimer', {}, (error) => {
+    const timerProfile = Meteor.user()?.profile || {}
+    Meteor.call('setTimer', {
+      timerId: Object.prototype.hasOwnProperty.call(timerProfile, 'timerId')
+        ? timerProfile.timerId : null,
+      expectedRevision: Object.prototype.hasOwnProperty.call(timerProfile, 'timerRevision')
+        ? timerProfile.timerRevision : null,
+    }, (error) => {
       if (error) {
         console.error(error)
       } else {
+        Meteor.clearTimeout(templateInstance.intervalHandle)
+        templateInstance.intervalHandle = undefined
+        templateInstance.timer.set(null)
+        templateInstance.project.set(null)
+        templateInstance.task.set(null)
+        templateInstance.customFields.set([])
+        if (getGlobalSetting('useStartTime')) {
+          templateInstance.startTime.set(null)
+        }
         if (document.title.indexOf('🔴') > 0) {
           document.title = document.title.replace(' 🔴', '')
         }
@@ -125,19 +139,13 @@ Template.timetracker.events({
         }
       }
     })
-    templateInstance.timer.set(null)
-    templateInstance.project.set(null)
-    templateInstance.task.set(null)
-    if (getGlobalSetting('useStartTime')) {
-      templateInstance.startTime.set(null)
-    }
   },
   'click .js-start': (event, templateInstance) => {
     event.preventDefault()
-    templateInstance.timer?.set(new Date())
-    templateInstance.project?.set($('.js-target-project').val())
-    templateInstance.task?.set($('.js-tasksearch-input').val())
-    templateInstance.startTime?.set($('#startTime').val())
+    const timestamp = new Date()
+    const projectId = $('.js-target-project').get(0).getAttribute('data-value')
+    const task = $('.js-tasksearch-input').val()
+    const startTime = $('#startTime').val()
     templateInstance.$('[data-bs-toggle="tooltip"]').tooltip('hide')
     const customFields = CustomFields.find().fetch()
     const customFieldsToSave = []
@@ -149,17 +157,22 @@ Template.timetracker.events({
         customFieldsToSave.push(customFieldEntry)
       }
     }
-    templateInstance.customFields?.set(customFieldsToSave)
     Meteor.call('setTimer', {
-      timestamp: new Date(),
-      project: $('.js-target-project').get(0).getAttribute('data-value'),
-      task: $('.js-tasksearch-input').val(),
-      startTime: $('#startTime').val(),
+      timestamp,
+      operationId: `ddp:${Random.id()}`,
+      project: projectId,
+      task,
+      startTime,
       customFields: customFieldsToSave,
-    }, (error) => {
+    }, (error, result) => {
       if (error) {
         console.error(error)
       } else {
+        templateInstance.timer?.set(dayjs(result?.startTime || timestamp))
+        templateInstance.project?.set(projectId)
+        templateInstance.task?.set(task)
+        templateInstance.startTime?.set(startTime)
+        templateInstance.customFields?.set(customFieldsToSave)
         if (document.title.indexOf('🔴') < 0) {
           document.title = `${document.title} 🔴`
         }

@@ -92,7 +92,8 @@ Template.settings.helpers({
   enableWekan: () => getUserSetting('enableWekan'),
   siwappurl: () => getUserSetting('siwappurl'),
   siwapptoken: () => getUserSetting('siwapptoken'),
-  titraAPItoken: () => getUserSetting('APItoken'),
+  // API tokens are write-only and are returned only at replacement time.
+  titraAPItoken: () => '',
   zammadurl: () => getUserSetting('zammadurl'),
   zammadtoken: () => getUserSetting('zammadtoken'),
   gitlaburl: () => getUserSetting('gitlaburl'),
@@ -143,7 +144,7 @@ Template.settings.events({
   },
   'click #generateToken': (event, templateInstance) => {
     event.preventDefault()
-    templateInstance.$('#titraAPItoken').val(Random.id())
+    templateInstance.$('#titraAPItoken').val(Random.secret(32)).trigger('focus').trigger('select')
   },
   'change #timeunit': (event, templateInstance) => {
     event.preventDefault()

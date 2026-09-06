@@ -1,81 +1,689 @@
-import { Match, check } from 'meteor/check'
+import { Meteor } from 'meteor/meteor'
 import { WebApp } from 'meteor/webapp'
+import { randomUUID } from 'node:crypto'
 import { getJson } from './bodyparser'
-import { insertTimeCard } from '../imports/api/timecards/server/methods'
+import {
+  checkTimeEntryRule,
+  deleteOwnedTimeCard,
+  insertAPITimeCard,
+  insertIdempotentAPITimeCard,
+  recoverAPITimeCard,
+  updateOwnedTimeCardDetails,
+  updateOwnedTimeCardTask,
+} from '../imports/api/timecards/server/methods'
+import { createCapabilitiesHandler, createTimeentryTaskHandler } from './timeentryTaskRoute.js'
+import { createTimeentryDetailsHandler } from './timeentryDetailsRoute.js'
+import {
+  createProjectArchiveHandler,
+  createProjectDeleteHandler,
+  createProjectDetailsHandler,
+  createProjectGetHandler,
+} from './projectLifecycleRoutes.js'
+import { createProjectFenceRecoveryHandler } from './projectFenceRecoveryRoutes.js'
+import {
+  createProjectTaskDeleteHandler,
+  createProjectTaskDetailsHandler,
+  createProjectTaskGetHandler,
+  createTaskSuggestionDeleteHandler,
+  createTaskSuggestionGetHandler,
+  createTaskSuggestionListHandler,
+} from './taskLifecycleRoutes.js'
+import { createAPIv2CapabilitiesHandler } from './APIv2Route.js'
+import { sendAPIv2Problem } from './APIv2Contracts.js'
+import {
+  createTimerGetHandler,
+  createTimerStartHandler,
+  createTimerStopHandler,
+} from './timerRoutes.js'
 import { sanitizeObject } from '../imports/utils/sanitizer.js'
+import {
+  authorizeAPIRequest,
+  parseCanonicalUTCMillisecondTimestamp,
+  publicUserIdentity,
+  routeParameters,
+  singleRouteParameter,
+} from './APIrouteHelpers.js'
+import { API_TOKEN_HASH_VERSION } from './apiTokenSecurity.js'
+import { createAPIRateLimits } from './apiRateLimit.js'
 import Timecards from '../imports/api/timecards/timecards'
 import Projects from '../imports/api/projects/projects'
 import Tasks from '../imports/api/tasks/tasks'
+import ApiIdempotency from '../imports/api/apiidempotency/apiidempotency.js'
 import {
+  insertAPIProjectWithId,
+  recoverAPIProjectWithId,
+} from '../imports/api/projects/server/apiCreate.js'
+import {
+  insertAPIProjectTaskWithId,
+  recoverAPIProjectTaskWithId,
+} from '../imports/api/tasks/server/apiCreate.js'
+import {
+  createMongoIdempotencyStore,
+  executeIdempotentCreate,
+  IdempotencyError,
+  validateIdempotencyKey,
+} from './apiIdempotency.js'
+import {
+  MAX_DATE_RANGE_DAYS,
+  MAX_LEGACY_RESULT_LIMIT,
+  PaginationError,
+  assertDateRangeLimit,
+  fetchBoundedAggregationList,
+  fetchBoundedLegacyList,
+  fetchTimeentryPage,
+} from './apiPagination.js'
+import { fetchBoundedProjectTaskStats } from './projectTaskStats.js'
+import { fetchTaskSuggestionPage } from './taskSuggestionPagination.js'
+import {
+  deleteEmptyOwnedProject,
+  editProjectDetails,
+  getProjectLifecyclePreview,
+  isProjectAdministrator,
+  isProjectMember,
+  serializeProjectForCaller,
+  setProjectArchived,
+} from '../imports/api/projects/server/projectLifecycle.js'
+import { deleteEmptyProjectForLifecycle } from '../imports/api/projects/server/methods.js'
+import {
+  createProjectChildWithFence,
+  definiteProjectChildNoWrite,
+  runWithProjectChildWriter,
+} from '../imports/api/projects/server/projectChildFence.js'
+import {
+  deleteProjectTask,
+  deleteTaskSuggestion,
+  editProjectTask,
+  getProjectTaskPreview,
+  getTaskSuggestionPreview,
+  serializeProjectTask,
+  serializeSuggestion,
+} from '../imports/api/tasks/server/taskLifecycle.js'
+import { deleteProjectTaskWithFence } from '../imports/api/tasks/server/taskGraphFence.js'
+import {
+  previewProjectFenceRecovery,
+  projectFenceRecoveryDeploymentEnabled,
+  recoverProjectFence,
+} from './projectFenceRecovery.js'
+import {
+  getTimerState,
+  startTimerAtomic,
+  stopTimerAtomic,
+} from '../imports/api/users/server/timerTransitions.js'
+import {
+  WEBHOOK_PATH,
+  webhookVerificationHandler,
+} from './webhookVerificationRoute.js'
+import { getGlobalSettingAsync } from '../imports/utils/server_method_helpers.js'
+import {
+  dateOnlyFromUTCDate,
   dateOnlyRange,
   isDateOnly,
   isStartTime,
   parseAPITimecardDate,
 } from '../imports/utils/timecardDate.js'
+import {
+  parseTimecardDateRevisionETag,
+  timecardDateRevisionETag,
+} from '../imports/utils/timecardRevision.js'
 
 const taskForbiddenCustomfieldKeys = new Set([
   '_id', 'projectId', 'name', 'start', 'end', 'estimatedHours', 'dependencies', 'isDefaultTask', 'userId', 'createdAt', 'updatedAt',
 ])
 
-function normalizeDomain(host) {
-  if (!host) return null
-  // Remove port
-  let domain = host.split(':')[0]
-  // Convert to lowercase
-  domain = domain.toLowerCase()
-  // Remove protocol prefix
-  domain = domain.replace(/^https?:\/\//, '')
-  return domain
+let idempotencyStore
+const apiRateLimits = createAPIRateLimits()
+
+function getIdempotencyStore() {
+  if (!idempotencyStore) idempotencyStore = createMongoIdempotencyStore(ApiIdempotency)
+  return idempotencyStore
 }
 
 function sendResponse(res, statusCode, message, payload) {
   const response = {}
   response.statusCode = statusCode
   response.message = message
-  if (payload) {
+  if (payload !== undefined) {
     response.payload = payload
   }
   res.writeHead(statusCode, {
-    'Content-Type': 'application/json',
+    'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
     Pragma: 'no-cache',
     'Access-Control-Allow-Origin': '*',
-    'Access-Control-Allow-Methods': 'GET, PUT, POST, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With',
+    'Access-Control-Allow-Methods': 'GET, PUT, POST, PATCH, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': [
+      'Content-Type', 'Authorization', 'If-Match', 'Idempotency-Key',
+      'X-Request-ID', 'X-Requested-With', 'X-Titra-Webhook-Timestamp',
+      'X-Titra-Webhook-Event-Id', 'X-Titra-Webhook-Signature',
+      'X-Titra-Expected-User-Id',
+    ].join(', '),
+    'Access-Control-Expose-Headers': [
+      'ETag', 'Idempotency-Replayed', 'Idempotency-Expires-At',
+      'X-Request-ID', 'Retry-After',
+    ].join(', '),
+    'X-Content-Type-Options': 'nosniff',
+    'Referrer-Policy': 'no-referrer',
+    'Permissions-Policy': 'camera=(), geolocation=(), microphone=(), payment=(), usb=()',
   })
-  res.end(JSON.stringify(response))
+  res.end(statusCode === 204 ? undefined : JSON.stringify(response))
 }
-async function checkAuthorization(req, res) {
-  const authHeader = req.headers.authorization
-  if (authHeader) {
-    const meteorUser = await Meteor.users.findOneAsync({ 'profile.APItoken': authHeader.split(' ')[1] })
-    if (authHeader && authHeader.split(' ')[1] && meteorUser) {
-      return meteorUser
-    }
+
+function sendBoundedReadFailure(res, error, oversizedMessage, internalMessage) {
+  if (error instanceof PaginationError && error.code === 'legacy-result-too-large') {
+    sendResponse(res, 413, oversizedMessage)
+    return
   }
-  sendResponse(res, 401, 'Missing authorization header or invalid authorization token supplied.')
+  sendResponse(res, 500, internalMessage)
+}
+
+function requireHttpMethod(req, res, method) {
+  if (req.method === 'OPTIONS') {
+    res.setHeader('Allow', `${method}, OPTIONS`)
+    sendResponse(res, 204, 'API preflight.')
+    return false
+  }
+  if (req.method === method) {
+    return true
+  }
+  res.setHeader('Allow', `${method}, OPTIONS`)
+  sendResponse(res, 405, `Method not allowed. Use ${method}.`)
   return false
 }
 
-async function checkProjectAccess(projectId, userId, res) {
-  const project = await Projects.findOneAsync({
-    _id: projectId,
-    $or: [
-      { userId },
-      { public: true },
-      { team: userId },
-      { admins: userId },
-    ],
+function requireStaticPath(req, res, expectedPath) {
+  const pathname = req._parsedUrl?.pathname || ''
+  if (pathname === expectedPath || pathname === `${expectedPath}/`) return true
+  sendResponse(res, 404, 'API route not found.')
+  return false
+}
+
+async function checkAuthorization(req, res) {
+  try {
+    const peerLimit = apiRateLimits.consumePeer(req)
+    if (!peerLimit.allowed) {
+      res.setHeader('Retry-After', String(peerLimit.retryAfterSeconds))
+      sendResponse(res, 429, 'Too many requests. Retry after the indicated delay.')
+      return false
+    }
+    const authorization = await authorizeAPIRequest(
+      req, (selector) => Meteor.users.findOneAsync(selector),
+      ({ userId, token, digest, version }) => Meteor.users.rawCollection().updateOne({
+        _id: userId,
+        inactive: { $ne: true },
+        'profile.APItoken': token,
+        $or: [
+          { 'services.titraApiToken': { $exists: false } },
+          {
+            'services.titraApiToken.version': version,
+            'services.titraApiToken.sha256': digest,
+          },
+        ],
+      }, {
+        $set: {
+          'services.titraApiToken': {
+            version: API_TOKEN_HASH_VERSION,
+            sha256: digest,
+            updatedAt: new Date(),
+          },
+        },
+        $unset: { 'profile.APItoken': '' },
+      }).then((result) => result.matchedCount === 1),
+    )
+    if (authorization.status === 'authorized') {
+      const userLimit = apiRateLimits.consumeUser(authorization.user._id)
+      if (!userLimit.allowed) {
+        res.setHeader('Retry-After', String(userLimit.retryAfterSeconds))
+        sendResponse(res, 429, 'Too many requests. Retry after the indicated delay.')
+        return false
+      }
+      return authorization.user
+    }
+    if (authorization.status === 'precondition_failed') {
+      sendResponse(res, 412, 'Expected API user precondition failed.')
+      return false
+    }
+    if (authorization.status === 'action_verification_required') {
+      sendResponse(res, 403, 'Required account verification is overdue.')
+      return false
+    }
+    sendResponse(res, 401, 'Missing authorization header or invalid authorization token supplied.')
+  } catch {
+    sendResponse(res, 500, 'Authentication could not be completed.')
+  }
+  return false
+}
+
+async function checkAuthorizationV2(req, res) {
+  try {
+    const peerLimit = apiRateLimits.consumePeer(req)
+    if (!peerLimit.allowed) {
+      sendAPIv2Problem(res, 'RATE_LIMITED', {
+        id: req.headers?.['x-request-id'],
+        retryAfterSeconds: peerLimit.retryAfterSeconds,
+      })
+      return false
+    }
+    const authorization = await authorizeAPIRequest(
+      req, (selector) => Meteor.users.findOneAsync(selector),
+      ({ userId, token, digest, version }) => Meteor.users.rawCollection().updateOne({
+        _id: userId,
+        inactive: { $ne: true },
+        'profile.APItoken': token,
+        $or: [
+          { 'services.titraApiToken': { $exists: false } },
+          {
+            'services.titraApiToken.version': version,
+            'services.titraApiToken.sha256': digest,
+          },
+        ],
+      }, {
+        $set: {
+          'services.titraApiToken': {
+            version: API_TOKEN_HASH_VERSION,
+            sha256: digest,
+            updatedAt: new Date(),
+          },
+        },
+        $unset: { 'profile.APItoken': '' },
+      }).then((result) => result.matchedCount === 1),
+    )
+    if (authorization.status === 'authorized') {
+      const userLimit = apiRateLimits.consumeUser(authorization.user._id)
+      if (!userLimit.allowed) {
+        sendAPIv2Problem(res, 'RATE_LIMITED', {
+          id: req.headers?.['x-request-id'],
+          retryAfterSeconds: userLimit.retryAfterSeconds,
+        })
+        return false
+      }
+      return authorization.user
+    }
+    if (authorization.status === 'precondition_failed') {
+      sendAPIv2Problem(res, 'PRECONDITION_FAILED', { id: req.headers?.['x-request-id'] })
+      return false
+    }
+    if (authorization.status === 'action_verification_required') {
+      sendAPIv2Problem(res, 'ACTION_VERIFICATION_REQUIRED', {
+        id: req.headers?.['x-request-id'],
+      })
+      return false
+    }
+    sendAPIv2Problem(res, 'UNAUTHENTICATED', { id: req.headers?.['x-request-id'] })
+  } catch (error) {
+    sendAPIv2Problem(res, 'INTERNAL_ERROR', { id: req.headers?.['x-request-id'] })
+  }
+  return false
+}
+
+function hasJsonContentType(req) {
+  return typeof req.headers?.['content-type'] === 'string'
+    && /^application\/json(?:\s*;\s*charset=utf-8)?\s*$/i.test(req.headers['content-type'])
+}
+
+function isPayloadTooLarge(error) {
+  return error?.type === 'entity.too.large'
+    || error?.status === 413
+    || error?.statusCode === 413
+}
+
+function invalidJsonRequestStatus(req, error) {
+  if (isPayloadTooLarge(error)) return 413
+  return hasJsonContentType(req) ? 400 : 415
+}
+
+function assertExactKeys(value, required, optional = []) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) {
+    throw new TypeError('Expected a JSON object.')
+  }
+  const requiredSet = new Set(required)
+  const allowed = new Set([...required, ...optional])
+  const keys = Object.keys(value)
+  if (required.some((key) => !Object.hasOwn(value, key))
+    || keys.some((key) => !allowed.has(key))
+    || keys.filter((key) => requiredSet.has(key)).length !== required.length) {
+    throw new TypeError('Unexpected or missing request fields.')
+  }
+  return value
+}
+
+function optionalIdempotencyKey(req) {
+  const key = req.headers?.['idempotency-key']
+  if (key == null) return null
+  return validateIdempotencyKey(key)
+}
+
+function setIdempotencyResponseHeaders(res, operation) {
+  res.setHeader('Idempotency-Replayed', operation.replayed ? 'true' : 'false')
+  if (operation.expiresAt instanceof Date && !Number.isNaN(operation.expiresAt.getTime())) {
+    res.setHeader('Idempotency-Expires-At', operation.expiresAt.toISOString())
+  }
+}
+
+function sendIdempotencyFailure(res, error) {
+  if (error instanceof IdempotencyError) {
+    if (error.code === 'invalid-idempotency-key') {
+      sendResponse(res, 400, 'Idempotency-Key must contain 16 to 128 visible ASCII characters.')
+      return true
+    }
+    if (error.code === 'idempotency-key-reused') {
+      sendResponse(res, 409, 'This Idempotency-Key was already used with a different request.')
+      return true
+    }
+    sendResponse(res, 500, 'The idempotent write outcome could not be confirmed. Retry only with the same Idempotency-Key.')
+    return true
+  }
+  return false
+}
+
+function serializeProjectTimecard(timecard, project, userId) {
+  if (isProjectMember(project, userId)) return timecard
+  return Object.fromEntries([
+    '_id', 'userId', 'projectId', 'date', 'dateOnly', 'startTime',
+    'hours', 'task', 'dateRevision',
+  ].filter((field) => Object.hasOwn(timecard, field)).map((field) => [field, timecard[field]]))
+}
+
+function projectVisibleSelector(userId) {
+  return {
+    $or: [{ userId }, { admins: userId }, { team: userId }, { public: true }],
+  }
+}
+
+const projectChildFenceDependencies = {
+  findOneAndUpdate: (...args) => Projects.rawCollection().findOneAndUpdate(...args),
+  findOne: (selector) => Projects.findOneAsync(selector),
+  updateOne: (selector, modifier) => Projects.rawCollection().updateOne(selector, modifier),
+}
+
+async function validateAPIProjectTaskDependencies(projectId, dependencies, taskId) {
+  if (!dependencies.length) return
+  if (taskId && dependencies.includes(taskId)) {
+    throw Object.assign(new Error('A task cannot depend on itself.'), {
+      error: 'project-task-invalid',
+    })
+  }
+  const count = await Tasks.find({
+    projectId,
+    _id: { $in: dependencies },
+  }).countAsync()
+  if (count !== dependencies.length) {
+    throw Object.assign(new Error('Task dependency is unavailable.'), {
+      error: 'project-task-invalid',
+    })
+  }
+}
+
+async function checkAPIProjectTaskCreateGuards(projectId, dependencies, userId) {
+  const project = await Projects.findOneAsync({ _id: projectId })
+  if (!project || !isProjectAdministrator(project, userId)) {
+    throw Object.assign(new Error('Project administrator access is required.'), {
+      error: 'api-project-task-admin-required',
+    })
+  }
+  try {
+    await validateAPIProjectTaskDependencies(projectId, dependencies)
+  } catch (error) {
+    if (error?.error === 'project-task-invalid') throw error
+    throw Object.assign(new Error('A project task dependency could not be verified.'), {
+      error: 'project-task-invalid',
+      cause: error,
+    })
+  }
+}
+
+const projectLifecycleDependencies = {
+  findProject: (selector) => Projects.findOneAsync(selector),
+  updateOne: (selector, modifier) => Projects.rawCollection().updateOne(selector, modifier),
+}
+
+const projectFenceRecoveryDependencies = {
+  findProject: (selector) => Projects.findOneAsync(selector),
+  findTimecard: (selector) => Timecards.findOneAsync(selector),
+  findTask: (selector) => Tasks.findOneAsync(selector),
+  updateOne: (selector, modifier) => Projects.rawCollection().updateOne(selector, modifier),
+}
+
+async function previewAPIProject(options) {
+  return getProjectLifecyclePreview(options, projectLifecycleDependencies)
+}
+
+async function previewAPIProjectTask(options) {
+  return getProjectTaskPreview(options, taskLifecycleDependencies)
+}
+
+function editAPIProject(options) {
+  return editProjectDetails(options, projectLifecycleDependencies)
+}
+
+function archiveAPIProject(options) {
+  return setProjectArchived(options, projectLifecycleDependencies)
+}
+
+function deleteAPIProject(options) {
+  return deleteEmptyOwnedProject(options, {
+    findProject: projectLifecycleDependencies.findProject,
+    deleteEmptyProject: (selector) => deleteEmptyProjectForLifecycle(selector),
   })
-  if (!project) {
+}
+
+async function inspectProjectTaskReferences(task) {
+  const [dependentTaskCount, usage] = await Promise.all([
+    Tasks.find({ projectId: task.projectId, dependencies: task._id }).countAsync(),
+    fetchBoundedAggregationList({
+      aggregate: (pipeline, options) => Timecards.rawCollection()
+        .aggregate(pipeline, options).toArray(),
+      pipeline: [
+        { $match: { projectId: task.projectId, task: task.name } },
+        {
+          $group: {
+            _id: null,
+            recordCount: { $sum: 1 },
+            totalHours: { $sum: '$hours' },
+          },
+        },
+      ],
+      maxLimit: 1,
+    }),
+  ])
+  return {
+    dependentTaskCount,
+    recordCount: usage[0]?.recordCount ?? 0,
+    totalHours: usage[0]?.totalHours ?? 0,
+  }
+}
+
+const taskLifecycleDependencies = {
+  findTask: (selector) => Tasks.findOneAsync(selector),
+  findProject: (selector) => Projects.findOneAsync(selector),
+  inspectReferences: inspectProjectTaskReferences,
+  validateDependencies: validateAPIProjectTaskDependencies,
+  withProjectWriter: ({ projectId, userId, taskId }, operation) => runWithProjectChildWriter({
+    selector: { _id: projectId, $or: [{ userId }, { admins: userId }] },
+    projectId,
+    reservationId: `task-update:${taskId}:${randomUUID()}`,
+    kind: 'project-task-update',
+    resourceId: taskId,
+    operation,
+  }, projectChildFenceDependencies),
+  deleteTaskWithFence: ({
+    task, project, userId, taskFingerprint,
+    acknowledgeRecordedEntries, expectedTaskSelector,
+  }) => deleteProjectTaskWithFence({
+    projectSelector: {
+      _id: project._id,
+      $or: [{ userId }, { admins: userId }],
+    },
+    projectId: project._id,
+    taskId: task._id,
+    taskName: task.name,
+    taskFingerprint,
+    lockId: `task-delete:${task._id}:${randomUUID()}`,
+    acknowledgeRecordedEntries,
+    inspectLockedState: async () => {
+      const [currentTask, currentProject, dependentTaskCount, recordCount] = await Promise.all([
+        Tasks.findOneAsync(expectedTaskSelector),
+        Projects.findOneAsync({
+          _id: project._id,
+          $or: [{ userId }, { admins: userId }],
+        }),
+        Tasks.find({ projectId: project._id, dependencies: task._id }).countAsync(),
+        Timecards.find({ projectId: project._id, task: task.name }).countAsync(),
+      ])
+      return {
+        conflict: !currentTask || !currentProject,
+        isDefault: currentTask?.isDefaultTask === true
+          || currentProject?.defaultTask === task.name,
+        dependentTaskCount,
+        recordCount,
+      }
+    },
+    deleteTask: () => Tasks.rawCollection().deleteOne(expectedTaskSelector),
+  }, projectChildFenceDependencies),
+  updateOne: (selector, modifier) => Tasks.rawCollection().updateOne(selector, modifier),
+  deleteOne: (selector) => Tasks.rawCollection().deleteOne(selector),
+}
+
+async function taskSuggestionUsage(userId, name) {
+  const usage = await fetchBoundedAggregationList({
+    aggregate: (pipeline, options) => Timecards.rawCollection()
+      .aggregate(pipeline, options).toArray(),
+    pipeline: [
+      { $match: { userId, task: name } },
+      {
+        $group: {
+          _id: '$projectId',
+          recordCount: { $sum: 1 },
+          totalHours: { $sum: '$hours' },
+          lastRecordedAt: { $max: '$date' },
+        },
+      },
+      {
+        $group: {
+          _id: null,
+          recordCount: { $sum: '$recordCount' },
+          totalHours: { $sum: '$totalHours' },
+          lastRecordedAt: { $max: '$lastRecordedAt' },
+          projectCount: { $sum: 1 },
+        },
+      },
+    ],
+    maxLimit: 1,
+  })
+  return {
+    recordCount: usage[0]?.recordCount ?? 0,
+    totalHours: usage[0]?.totalHours ?? 0,
+    lastRecordedAt: usage[0]?.lastRecordedAt ?? null,
+    projectCount: usage[0]?.projectCount ?? 0,
+  }
+}
+
+const suggestionLifecycleDependencies = {
+  findSuggestion: (selector) => Tasks.findOneAsync(selector),
+  getUsage: taskSuggestionUsage,
+  deleteOne: (selector) => Tasks.rawCollection().deleteOne(selector),
+}
+
+async function listPersonalTaskSuggestions({ userId, limit, cursor }) {
+  return fetchTaskSuggestionPage({
+    userId,
+    limit,
+    cursor,
+    find: (selector, options) => Tasks.find(selector, options).fetchAsync(),
+    serialize: async (suggestion) => serializeSuggestion(
+      suggestion, await taskSuggestionUsage(userId, suggestion.name),
+    ),
+  })
+}
+
+async function createAPIProjectTaskWithFence({
+  projectId, userId, taskFields, taskId,
+}) {
+  const targetTaskId = taskId || randomUUID()
+  return createProjectChildWithFence({
+    selector: { _id: projectId, $or: [{ userId }, { admins: userId }] },
+    projectId,
+    reservationId: `api-task:${targetTaskId}`,
+    kind: 'project-task-create',
+    resourceId: targetTaskId,
+    createChild: async () => {
+      try {
+        await validateAPIProjectTaskDependencies(projectId, taskFields.dependencies || [])
+      } catch (error) {
+        throw definiteProjectChildNoWrite(error)
+      }
+      if (taskId) {
+        const result = await insertAPIProjectTaskWithId(taskFields, taskId)
+        return result && {
+          resourceId: result.taskId,
+          created: result.created,
+          payload: { taskId: result.taskId },
+        }
+      }
+      await Tasks.insertAsync({ ...taskFields, _id: targetTaskId })
+      return {
+        resourceId: targetTaskId,
+        created: true,
+        payload: { taskId: targetTaskId },
+      }
+    },
+    removeCreatedChild: (resourceId) => Tasks.rawCollection().deleteOne({
+      _id: resourceId, projectId,
+    }),
+  }, projectChildFenceDependencies)
+}
+
+async function checkProjectAccess(projectId, userId, res) {
+  try {
+    const project = await Projects.findOneAsync({
+      _id: projectId,
+      $or: [{ userId }, { public: true }, { team: userId }, { admins: userId }],
+    })
+    if (project) return project
     sendResponse(res, 403, 'Access denied to project.')
-    return false
+  } catch (error) {
+    sendResponse(res, 500, 'Project access could not be verified.')
+  }
+  return false
+}
+
+async function requireTimeentryCreateProjectAccess(projectId, userId) {
+  let project
+  try {
+    project = await Projects.findOneAsync({
+      _id: projectId,
+      $or: [{ userId }, { public: true }, { team: userId }, { admins: userId }],
+    })
+  } catch (error) {
+    throw Object.assign(new Error('Project access could not be verified.'), {
+      error: 'api-project-access-check-failed',
+      cause: error,
+    })
+  }
+  if (!project) {
+    throw Object.assign(new Error('Access denied to project.'), {
+      error: 'api-project-access-denied',
+    })
   }
   return project
 }
+
+async function checkIdempotentTimeentryCreateGuards({
+  userId, projectId, task, date, dateOnly, startTime, hours,
+}) {
+  await requireTimeentryCreateProjectAccess(projectId, userId)
+  await checkTimeEntryRule({
+    userId, projectId, task, state: 'new', date, dateOnly, startTime, hours,
+  })
+}
+
 /**
  * @apiDefine AuthError
+ * @apiHeader {String} [X-Titra-Expected-User-Id] Optional immutable user-ID pin. When supplied,
+ * every authenticated request fails with HTTP 412 if the token resolves to another user.
  * @apiError {json} AuthError The request is missing the authentication header or an invalid API token has been provided.
+ * @apiError (403) ActionVerificationRequired Required account verification is overdue.
+ * @apiError (412) ExpectedUserMismatch The optional expected-user identity pin did not match.
  * @apiErrorExample {json} Authorization-Error-Response:
  *     HTTP/1.1 401 Unauthorized
  *     {
@@ -93,7 +701,7 @@ async function checkProjectAccess(projectId, userId, res) {
  * @apiBody {String} projectId The project ID.
  * @apiBody {String} task The task description of the new time entry.
  * @apiBody {Date} date The date for the new time entry in format YYYY-MM-DD.
- * @apiBody {String} [startTime] Optional local start time in HH:mm format.
+ * @apiBody {String} [startTime] Optional start time in format HH:mm.
  * @apiBody {Number} hours The number of hours to track.
  * @apiBody {Number} [taskRate] The rate for the task.
  * @apiBody {Object} [customfields] An object containing custom fields for the time entry.
@@ -115,56 +723,372 @@ async function checkProjectAccess(projectId, userId, res) {
  * @apiUse AuthError
  */
 WebApp.handlers.use('/timeentry/create/', async (req, res) => {
+  if (!requireStaticPath(req, res, '/timeentry/create')) return
+  if (!requireHttpMethod(req, res, 'POST')) return
+  const meteorUser = await checkAuthorization(req, res)
+  if (!meteorUser) return
+  let json; let date; let dateOnly; let key
+  try {
+    if (!hasJsonContentType(req)) throw new TypeError()
+    json = assertExactKeys(
+      await getJson(req, { limit: '64kb' }),
+      ['projectId', 'task', 'date', 'hours'],
+      ['startTime', 'taskRate', 'customfields'],
+    )
+    if (typeof json.projectId !== 'string' || !json.projectId || json.projectId.length > 128
+      || typeof json.task !== 'string' || !json.task.trim() || !json.task.isWellFormed()
+      || [...json.task].length > 1000 || typeof json.date !== 'string'
+      || typeof json.hours !== 'number' || !Number.isFinite(json.hours)
+      || (json.startTime != null && !isStartTime(json.startTime))
+      || (json.taskRate != null
+        && (typeof json.taskRate !== 'number' || !Number.isFinite(json.taskRate)))
+      || (json.customfields != null
+        && (!json.customfields || typeof json.customfields !== 'object'
+          || Array.isArray(json.customfields)))) throw new TypeError()
+    date = parseAPITimecardDate(json.date)
+    const normalizedDateOnly = isDateOnly(json.date) ? json.date : dateOnlyFromUTCDate(date)
+    // A timestamp without a separate start time is a legacy payload. Keep its
+    // combined Date intact because the originating timezone cannot be inferred.
+    dateOnly = isDateOnly(json.date) || json.startTime != null ? normalizedDateOnly : undefined
+    key = optionalIdempotencyKey(req)
+  } catch (error) {
+    if (sendIdempotencyFailure(res, error)) return
+    sendResponse(
+      res,
+      invalidJsonRequestStatus(req, error),
+      isPayloadTooLarge(error) ? 'Time entry create request is too large.' : 'Invalid time entry create request.',
+    )
+    return
+  }
+  try {
+    let payload
+    if (key) {
+      const operation = await executeIdempotentCreate({
+        key,
+        userId: meteorUser._id,
+        operation: 'timeentry.create',
+        normalizedRequest: {
+          projectId: json.projectId,
+          task: json.task,
+          date: date.toISOString(),
+          dateOnly: dateOnly ?? null,
+          startTime: json.startTime ?? null,
+          hours: json.hours,
+          taskRate: json.taskRate ?? null,
+          customfields: json.customfields ?? null,
+        },
+        store: getIdempotencyStore(),
+        beforeCreate: () => checkIdempotentTimeentryCreateGuards({
+          userId: meteorUser._id,
+          projectId: json.projectId,
+          task: json.task,
+          date,
+          dateOnly,
+          startTime: json.startTime,
+          hours: json.hours,
+        }),
+        create: async (timecardId) => {
+          const result = await insertIdempotentAPITimeCard(
+            json.projectId, json.task, date, json.hours, meteorUser._id,
+            json.taskRate, json.customfields, dateOnly, json.startTime, timecardId,
+          )
+          return { timecardId: result.timecardId }
+        },
+        recover: async (timecardId) => {
+          const result = await recoverAPITimeCard(
+            json.projectId, json.task, date, json.hours, meteorUser._id,
+            json.taskRate, json.customfields, dateOnly, json.startTime, timecardId,
+          )
+          return result ? { timecardId: result.timecardId } : null
+        },
+      })
+      setIdempotencyResponseHeaders(res, operation)
+      payload = operation.result
+    } else {
+      const project = await checkProjectAccess(json.projectId, meteorUser._id, res)
+      if (!project) return
+      payload = {
+        timecardId: await insertAPITimeCard(
+          json.projectId, json.task, date, json.hours, meteorUser._id,
+          json.taskRate, json.customfields, dateOnly, json.startTime,
+        ),
+      }
+    }
+    sendResponse(res, 200, key && payload ? 'Time entry create result returned.' : 'Time entry created.', payload)
+  } catch (error) {
+    if (sendIdempotencyFailure(res, error)) return
+    if (error?.error === 'notifications.timecard_migration_locked') {
+      sendResponse(res, 503, 'Time entries are temporarily locked for date migration.')
+    } else if (error?.error === 'api-project-access-denied') {
+      sendResponse(res, 403, 'Access denied to project.')
+    } else if (error?.error === 'api-project-access-check-failed') {
+      sendResponse(res, 500, 'Project access could not be verified.')
+    } else if (error?.error === 'timecard-rule-blocked') {
+      sendResponse(res, 422, 'The configured time entry rule prevented this time entry.')
+    } else if (key) {
+      sendResponse(res, 500, 'Time entry creation could not be confirmed. Retry only with the same Idempotency-Key.')
+    } else {
+      sendResponse(res, 500, 'Time entry creation could not be confirmed. Inspect saved entries before retrying.')
+    }
+  }
+})
+
+/**
+ * @api {get} /timeentry/get/:timecardId Get time entry
+ * @apiDescription Return one time entry owned by the user assigned to the API token.
+ * @apiName getTimeEntry
+ * @apiGroup TimeEntry
+ *
+ * @apiHeader {String} Token The authorization header Bearer API token.
+ * @apiParam {String} timecardId The time entry ID.
+ * @apiSuccess {Object} payload The owned time entry.
+ * @apiSuccessHeader {String} ETag The date revision required to delete this version.
+ * @apiError (404) NotFound The time entry does not exist or is not owned by the user.
+ * @apiUse AuthError
+ */
+WebApp.handlers.use('/timeentry/get/', async (req, res) => {
+  if (!requireHttpMethod(req, res, 'GET')) {
+    return
+  }
   const meteorUser = await checkAuthorization(req, res)
   if (!meteorUser) {
     return
   }
-  let json
+  let timecardId
   try {
-    json = await getJson(req)
-  } catch (e) {
-    sendResponse(res, 400, `Invalid JSON received. ${e}`)
-  }
-  if (json) {
-    let date
-    try {
-      check(json.projectId, String)
-      check(json.task, String)
-      date = parseAPITimecardDate(json.date)
-      check(json.startTime, Match.Maybe(Match.Where(isStartTime)))
-      if (json.startTime != null && !isDateOnly(json.date)) {
-        throw new TypeError('startTime requires a YYYY-MM-DD date')
-      }
-      check(json.hours, Number)
-      check(json.taskRate, Match.Maybe(Number))
-      check(json.customfields, Match.Maybe(Object))
-    } catch (error) {
-      sendResponse(res, 500, `Invalid parameters received.${error}`)
-      return
-    }
-    // Check if user has access to the project
-    const project = await checkProjectAccess(json.projectId, meteorUser._id, res)
-    if (!project) {
-      return
-    }
-    const dateOnly = isDateOnly(json.date) ? json.date : undefined
-    const timecardId = await insertTimeCard(
-      json.projectId,
-      json.task,
-      date,
-      json.hours,
-      meteorUser._id,
-      json.taskRate,
-      json.customfields,
-      dateOnly,
-      json.startTime,
-    )
-    const payload = {}
-    payload.timecardId = timecardId
-    sendResponse(res, 200, 'Time entry created.', payload)
+    timecardId = singleRouteParameter(req._parsedUrl?.pathname, '/timeentry/get')
+  } catch (error) {
+    sendResponse(res, 400, 'Invalid time entry ID.')
     return
   }
-  sendResponse(res, 500, 'Missing mandatory parameters.')
+  const timecard = await Timecards.findOneAsync({
+    _id: timecardId,
+    userId: meteorUser._id,
+  })
+  if (!timecard) {
+    sendResponse(res, 404, 'Time entry not found.')
+    return
+  }
+  let revisionETag
+  try {
+    revisionETag = timecardDateRevisionETag(timecard)
+  } catch (error) {
+    sendResponse(res, 500, 'The time entry revision could not be read.')
+    return
+  }
+  res.setHeader('ETag', revisionETag)
+  sendResponse(res, 200, 'Returning time entry.', timecard)
+})
+
+/**
+ * @api {patch} /timeentry/task/:timecardId Edit owned time entry task only
+ * @apiName updateTimeEntryTask
+ * @apiGroup TimeEntry
+ * @apiDescription Changes only task and its concurrency revision. Dates (including
+ * legacy timestamps), hours, projects, rates, custom fields and task suggestions
+ * are unchanged. A no-op still checks authorization, rule, migration lock and
+ * preview preconditions, but does not increment the revision.
+ * @apiHeader {String} Authorization Bearer API token.
+ * @apiHeader {String} Content-Type application/json.
+ * @apiHeader {String} If-Match ETag from GET /timeentry/get/:timecardId.
+ * @apiParam {String} timecardId Owned time entry ID.
+ * @apiBody {String} task Exact new task text; nonblank, at most 1000 Unicode code points.
+ * @apiBody {String} expectedTask Exact previous task text, including an empty string.
+ * @apiSuccess {Object} payload timecardId, task, previousTask and changed boolean.
+ * @apiSuccessHeader {String} ETag Updated revision, or unchanged revision for a no-op.
+ * @apiError (400) InvalidRequest Invalid JSON, fields, ID or If-Match; no extra fields accepted.
+ * @apiError (404) NotFound Entry is missing, not owned, or its project is inaccessible.
+ * @apiError (409) WriteConflict Old task/revision changed or revision cannot advance.
+ * @apiError (422) RuleBlocked The configured time entry rule prevented the edit.
+ * @apiError (428) PreconditionRequired Missing If-Match.
+ * @apiError (503) MigrationLocked Time-entry changes are temporarily locked.
+ * @apiUse AuthError
+ */
+WebApp.handlers.use('/timeentry/task/', createTimeentryTaskHandler({
+  authorize: checkAuthorization,
+  readJson: getJson,
+  editTask: updateOwnedTimeCardTask,
+  sendResponse,
+}))
+
+WebApp.handlers.use('/timeentry/details/', createTimeentryDetailsHandler({
+  authorize: checkAuthorization,
+  readJson: getJson,
+  editDetails: updateOwnedTimeCardDetails,
+  sendResponse,
+}))
+
+WebApp.handlers.use('/project/get/', createProjectGetHandler({
+  authorize: checkAuthorization,
+  previewProject: previewAPIProject,
+  sendResponse,
+}))
+
+WebApp.handlers.use('/project/details/', createProjectDetailsHandler({
+  authorize: checkAuthorization,
+  readJson: getJson,
+  editProject: editAPIProject,
+  sendResponse,
+}))
+
+WebApp.handlers.use('/project/archive/', createProjectArchiveHandler({
+  authorize: checkAuthorization,
+  readJson: getJson,
+  archiveProject: archiveAPIProject,
+  sendResponse,
+}))
+
+WebApp.handlers.use('/project/delete/', createProjectDeleteHandler({
+  authorize: checkAuthorization,
+  readJson: getJson,
+  deleteProject: deleteAPIProject,
+  sendResponse,
+}))
+
+WebApp.handlers.use('/project/recovery/', createProjectFenceRecoveryHandler({
+  authorize: checkAuthorization,
+  readJson: getJson,
+  previewRecovery: (options) => previewProjectFenceRecovery(
+    options, projectFenceRecoveryDependencies,
+  ),
+  recover: (options) => recoverProjectFence(options, projectFenceRecoveryDependencies),
+  sendResponse,
+}))
+
+WebApp.handlers.use('/project/task/get/', createProjectTaskGetHandler({
+  authorize: checkAuthorization,
+  previewTask: previewAPIProjectTask,
+  sendResponse,
+}))
+
+WebApp.handlers.use('/project/task/details/', createProjectTaskDetailsHandler({
+  authorize: checkAuthorization,
+  readJson: getJson,
+  editTask: (options) => editProjectTask(options, taskLifecycleDependencies),
+  sendResponse,
+}))
+
+WebApp.handlers.use('/project/task/delete/', createProjectTaskDeleteHandler({
+  authorize: checkAuthorization,
+  readJson: getJson,
+  deleteTask: (options) => deleteProjectTask(options, taskLifecycleDependencies),
+  sendResponse,
+}))
+
+WebApp.handlers.use('/task-suggestions/get/', createTaskSuggestionGetHandler({
+  authorize: checkAuthorization,
+  previewSuggestion: (options) => getTaskSuggestionPreview(
+    options, suggestionLifecycleDependencies,
+  ),
+  sendResponse,
+}))
+
+WebApp.handlers.use('/task-suggestions/delete/', createTaskSuggestionDeleteHandler({
+  authorize: checkAuthorization,
+  readJson: getJson,
+  deleteSuggestion: (options) => deleteTaskSuggestion(
+    options, suggestionLifecycleDependencies,
+  ),
+  sendResponse,
+}))
+
+WebApp.handlers.use('/task-suggestions/', createTaskSuggestionListHandler({
+  authorize: checkAuthorization,
+  listSuggestions: listPersonalTaskSuggestions,
+  sendResponse,
+}))
+
+WebApp.handlers.use('/capabilities/v2/', createAPIv2CapabilitiesHandler({
+  authorize: checkAuthorizationV2,
+  configuration: async () => ({
+    projectFenceRecoveryEnabled: projectFenceRecoveryDeploymentEnabled(),
+    webhookActionVerificationEnabled: await getGlobalSettingAsync(
+      'enableUserActionVerification',
+    ) === true,
+  }),
+}))
+
+/**
+ * @api {get} /capabilities/ Get API capabilities
+ * @apiName getAPICapabilities
+ * @apiGroup API
+ * @apiDescription Authenticated discovery of this server's supported API features.
+ * @apiSuccess {Number} payload.apiVersion Capability contract version (1).
+ * @apiSuccess {Object} payload.features Supported feature flags.
+ * @apiSuccess {Object} payload.taskUpdate Task-only edit safety requirements and limit.
+ * @apiUse AuthError
+ */
+WebApp.handlers.use('/capabilities/', createCapabilitiesHandler({
+  authorize: checkAuthorization,
+  sendResponse,
+}))
+
+/**
+ * @api {delete} /timeentry/delete/:timecardId Delete time entry
+ * @apiDescription Delete one time entry owned by the user assigned to the API token.
+ * @apiName deleteTimeEntry
+ * @apiGroup TimeEntry
+ *
+ * @apiHeader {String} Token The authorization header Bearer API token.
+ * @apiHeader {String} If-Match The ETag returned by Get time entry.
+ * @apiParam {String} timecardId The time entry ID.
+ * @apiSuccess {Object} payload The deleted time entry ID.
+ * @apiError (404) NotFound The time entry does not exist or is not owned by the user.
+ * @apiError (409) WriteConflict The time entry changed while it was being deleted.
+ * @apiError (428) PreconditionRequired The If-Match header is missing.
+ * @apiError (503) MigrationLocked Time-entry changes are temporarily locked.
+ * @apiUse AuthError
+ */
+WebApp.handlers.use('/timeentry/delete/', async (req, res) => {
+  if (!requireHttpMethod(req, res, 'DELETE')) {
+    return
+  }
+  const meteorUser = await checkAuthorization(req, res)
+  if (!meteorUser) {
+    return
+  }
+  let timecardId
+  try {
+    timecardId = singleRouteParameter(req._parsedUrl?.pathname, '/timeentry/delete')
+  } catch (error) {
+    sendResponse(res, 400, `Invalid time entry ID. ${error.message}`)
+    return
+  }
+  const ifMatch = req.headers['if-match']
+  if (ifMatch == null) {
+    sendResponse(res, 428, 'If-Match is required. Preview the time entry before deleting it.')
+    return
+  }
+  let expectedDateRevision
+  try {
+    expectedDateRevision = parseTimecardDateRevisionETag(ifMatch)
+  } catch (error) {
+    sendResponse(res, 400, error.message)
+    return
+  }
+  try {
+    await deleteOwnedTimeCard(timecardId, meteorUser._id, expectedDateRevision)
+  } catch (error) {
+    if (error?.error === 'not-authorized') {
+      sendResponse(res, 404, 'Time entry not found.')
+      return
+    }
+    if (error?.error === 'timecard-write-conflict') {
+      sendResponse(res, 409, error.reason || error.message)
+      return
+    }
+    if (error?.error === 'notifications.timecard_migration_locked') {
+      sendResponse(res, 503, 'Time entries are temporarily locked for date migration.')
+      return
+    }
+    if (error?.error === 'timecard-rule-blocked') {
+      sendResponse(res, 422, 'The configured time entry rule prevented this deletion.')
+      return
+    }
+    sendResponse(res, 500, 'Time entry deletion could not be confirmed. Inspect the entry before retrying.')
+    return
+  }
+  sendResponse(res, 200, 'Time entry deleted.', { timecardId })
 })
 
 /**
@@ -176,68 +1100,143 @@ WebApp.handlers.use('/timeentry/create/', async (req, res) => {
   * @apiHeader {String} Token The authorization header Bearer API token.
   * @apiParam {Date} date The date to list time entries for in format YYYY-MM-DD.
 
-  * @apiSuccess {json} response An array of time entries tracked for the user with the provided API token
+  * @apiSuccess {json} response An array of time entries tracked for the user with the
+  * provided API token
   * for the provided date.
+  * @apiError (413) ResultTooLarge More than 500 entries exist for the requested day; use
+  * the paginated date-range endpoint.
   * @apiUse AuthError
   */
 WebApp.handlers.use('/timeentry/list/', async (req, res) => {
+  if (!requireHttpMethod(req, res, 'GET')) return
   const meteorUser = await checkAuthorization(req, res)
   if (!meteorUser) {
     return
   }
-  const { pathname } = req._parsedUrl
-  const url = pathname.split('/')
-  let startDate
-  let endDate
+  let requestedDate; let dateRange
   try {
-    const range = dateOnlyRange(url[3])
-    startDate = range.startDate
-    endDate = range.endDate
+    ;[requestedDate] = routeParameters(req._parsedUrl?.pathname, '/timeentry/list', 1)
+    dateRange = dateOnlyRange(requestedDate)
   } catch (error) {
-    sendResponse(res, 500, `Invalid parameters received.${error}`)
+    sendResponse(res, 400, 'Invalid date. Use YYYY-MM-DD.')
     return
   }
-  const payload = await Timecards.find({
-    userId: meteorUser._id,
-    date: { $gte: startDate, $lte: endDate },
-  }).fetchAsync()
-  sendResponse(res, 200, `Returning user time entries for date ${url[3]}`, payload)
+  try {
+    const payload = await fetchBoundedLegacyList({
+      find: (selector, options) => Timecards.find(selector, options).fetchAsync(),
+      baseSelector: {
+        userId: meteorUser._id,
+        date: { $gte: dateRange.startDate, $lte: dateRange.endDate },
+      },
+      sort: { date: 1, _id: 1 },
+    })
+    sendResponse(res, 200, `Returning user time entries for date ${requestedDate}`, payload)
+  } catch (error) {
+    sendBoundedReadFailure(
+      res,
+      error,
+      `More than ${MAX_LEGACY_RESULT_LIMIT} time entries exist for that day. `
+        + 'Use the paginated date-range endpoint.',
+      'Time entries for that day could not be read.',
+    )
+  }
+})
+
+WebApp.handlers.use('/timeentry/daterange-page/', async (req, res) => {
+  if (!requireHttpMethod(req, res, 'GET')) return
+  const meteorUser = await checkAuthorization(req, res)
+  if (!meteorUser) return
+  let from; let to; let dateRange
+  try {
+    ;[from, to] = routeParameters(
+      req._parsedUrl?.pathname, '/timeentry/daterange-page', 2,
+    )
+    dateRange = dateOnlyRange(from, to)
+    assertDateRangeLimit(dateRange)
+  } catch (error) {
+    sendResponse(
+      res,
+      400,
+      `Invalid paginated date-range request. A range may contain at most `
+        + `${MAX_DATE_RANGE_DAYS} days.`,
+    )
+    return
+  }
+  try {
+    const query = new URL(
+      req.url || req._parsedUrl?.pathname || '/', 'http://local.invalid',
+    ).searchParams
+    const payload = await fetchTimeentryPage({
+      find: (selector, options) => Timecards.find(selector, options).fetchAsync(),
+      baseSelector: {
+        userId: meteorUser._id,
+        date: { $gte: dateRange.startDate, $lte: dateRange.endDate },
+      },
+      scope: { kind: 'owner-timeentries', userId: meteorUser._id, from, to },
+      query,
+    })
+    sendResponse(res, 200, `Returning a page of user time entries from ${from} to ${to}.`, payload)
+  } catch (error) {
+    if (error instanceof PaginationError) {
+      sendResponse(res, 400, 'Invalid page options or cursor.')
+    } else {
+      sendResponse(res, 500, 'The paginated date-range request could not be completed.')
+    }
+  }
 })
 /**
   * @api {get} /timeentry/daterange/:fromDate/:toDate Get time entries for daterange
-  * @apiDescription list time entries of the authorized user for the provided date range
+  * @apiDescription List time entries of the authorized user for a range of at most 366 days.
   * @apiName getTimeEntriesForDateRange
   * @apiGroup TimeEntry
   *
   * @apiHeader {String} Token The authorization header Bearer API token.
   * @apiParam {Date} fromDate The date to list time entries starting from in format YYYY-MM-DD.
   * @apiParam {Date} toDate The date to list time entries ending at in format YYYY-MM-DD.
-  * @apiSuccess {json} response An array of time entries tracked for the user with the provided API token
+  * @apiSuccess {json} response An array of time entries tracked for the user with the
+  * provided API token
   * for the provided date range.
+  * @apiError (413) ResultTooLarge More than 500 entries match; use the paginated endpoint.
   * @apiUse AuthError
   */
 WebApp.handlers.use('/timeentry/daterange/', async (req, res) => {
+  if (!requireHttpMethod(req, res, 'GET')) return
   const meteorUser = await checkAuthorization(req, res)
   if (!meteorUser) {
     return
   }
-  const { pathname } = req._parsedUrl
-  const url = pathname.split('/')
-  let fromDate
-  let toDate
+  let from; let to; let dateRange
   try {
-    const range = dateOnlyRange(url[3], url[4])
-    fromDate = range.startDate
-    toDate = range.endDate
+    ;[from, to] = routeParameters(req._parsedUrl?.pathname, '/timeentry/daterange', 2)
+    dateRange = dateOnlyRange(from, to)
+    assertDateRangeLimit(dateRange)
   } catch (error) {
-    sendResponse(res, 500, `Invalid parameters received.${error}`)
+    sendResponse(
+      res,
+      400,
+      `Invalid date range. Use two YYYY-MM-DD dates spanning at most ${MAX_DATE_RANGE_DAYS} days.`,
+    )
     return
   }
-  const payload = await Timecards.find({
-    userId: meteorUser._id,
-    date: { $gte: fromDate, $lte: toDate },
-  }).fetchAsync()
-  sendResponse(res, 200, `Returning user time entries for date range ${fromDate} to ${toDate}`, payload)
+  try {
+    const payload = await fetchBoundedLegacyList({
+      find: (selector, options) => Timecards.find(selector, options).fetchAsync(),
+      baseSelector: {
+        userId: meteorUser._id,
+        date: { $gte: dateRange.startDate, $lte: dateRange.endDate },
+      },
+      sort: { date: 1, _id: 1 },
+    })
+    sendResponse(res, 200, `Returning user time entries for date range ${from} to ${to}`, payload)
+  } catch (error) {
+    sendBoundedReadFailure(
+      res,
+      error,
+      `This range contains more than ${MAX_LEGACY_RESULT_LIMIT} time entries. `
+        + 'Use the paginated date-range endpoint.',
+      'Time entries for that range could not be read.',
+    )
+  }
 })
 
 /**
@@ -247,18 +1246,37 @@ WebApp.handlers.use('/timeentry/daterange/', async (req, res) => {
    * @apiGroup Project
    *
    * @apiHeader {String} Token The authorization header Bearer API token.
-   * @apiSuccess {json} response An array of all projects visible for the user with the provided API token.
+   * @apiSuccess {json} response An array of all projects visible for the user with the
+   * provided API token.
+   * @apiError (413) ResultTooLarge More than 500 projects are visible.
    * @apiUse AuthError
    */
 WebApp.handlers.use('/project/list/', async (req, res) => {
+  if (!requireStaticPath(req, res, '/project/list')) return
+  if (!requireHttpMethod(req, res, 'GET')) return
   const meteorUser = await checkAuthorization(req, res)
   if (!meteorUser) {
     return
   }
-  const payload = await Projects.find({
-    $or: [{ userId: meteorUser._id }, { public: true }, { team: meteorUser._id }],
-  }).fetchAsync()
-  sendResponse(res, 200, 'Returning projects', payload)
+  try {
+    const projects = await fetchBoundedLegacyList({
+      find: (selector, options) => Projects.find(selector, options).fetchAsync(),
+      baseSelector: projectVisibleSelector(meteorUser._id),
+      sort: { _id: 1 },
+    })
+    const payload = projects
+      .map((project) => serializeProjectForCaller(project, meteorUser._id))
+      .filter(Boolean)
+    sendResponse(res, 200, 'Returning projects', payload)
+  } catch (error) {
+    sendBoundedReadFailure(
+      res,
+      error,
+      `More than ${MAX_LEGACY_RESULT_LIMIT} projects are visible. Archive projects before `
+        + 'listing them through this legacy endpoint.',
+      'Projects could not be read.',
+    )
+  }
 })
 
 /**
@@ -270,16 +1288,23 @@ WebApp.handlers.use('/project/list/', async (req, res) => {
  * @apiHeader {String} Token The authorization header Bearer API token.
  * @apiParam {String} projectId The ID of the project to list time entries for.
  * @apiSuccess {json} response An array of time entries for the specified project.
+ * @apiError (413) ResultTooLarge More than 500 entries exist; use paginated project
+ * date ranges.
  * @apiUse AuthError
  */
 WebApp.handlers.use('/project/timeentries/', async (req, res) => {
+  if (!requireHttpMethod(req, res, 'GET')) return
   const meteorUser = await checkAuthorization(req, res)
   if (!meteorUser) {
     return
   }
-  const { pathname } = req._parsedUrl
-  const url = pathname.split('/')
-  const projectId = url[3]
+  let projectId
+  try {
+    projectId = singleRouteParameter(req._parsedUrl?.pathname, '/project/timeentries')
+  } catch (error) {
+    sendResponse(res, 400, 'Invalid project ID.')
+    return
+  }
 
   // Check if user has access to the project
   const project = await checkProjectAccess(projectId, meteorUser._id, res)
@@ -287,48 +1312,192 @@ WebApp.handlers.use('/project/timeentries/', async (req, res) => {
     return
   }
 
-  const payload = await Timecards.find({
-    projectId,
-  }).fetchAsync()
-  sendResponse(res, 200, 'Returning time entries for project', payload)
+  try {
+    const timecards = await fetchBoundedLegacyList({
+      find: (selector, options) => Timecards.find(selector, options).fetchAsync(),
+      baseSelector: { projectId },
+      sort: { date: 1, _id: 1 },
+    })
+    const payload = timecards.map((timecard) => (
+      serializeProjectTimecard(timecard, project, meteorUser._id)
+    ))
+    sendResponse(res, 200, 'Returning time entries for project', payload)
+  } catch (error) {
+    sendBoundedReadFailure(
+      res,
+      error,
+      `This project contains more than ${MAX_LEGACY_RESULT_LIMIT} time entries. `
+        + 'Use paginated project date ranges.',
+      'Project time entries could not be read.',
+    )
+  }
 })
+
 /**
- * @api {get} /project/timeentriesfordaterange/:projectId/:fromDate/:toDate Get time entries for a project within a date range
+ * @api {get} /project/users/:projectId Get project users
+ * @apiDescription Return IDs and display names for users with time entries on an
+ * accessible project.
+ * @apiName getProjectUsers
+ * @apiGroup Project
+ *
+ * @apiHeader {String} Token The authorization header Bearer API token.
+ * @apiParam {String} projectId The project ID.
+ * @apiSuccess {Object[]} payload Project time-entry user IDs and display names.
+ * @apiError (413) ResultTooLarge More than 500 users have entries on the project.
+ * @apiUse AuthError
+ */
+WebApp.handlers.use('/project/users/', async (req, res) => {
+  if (!requireHttpMethod(req, res, 'GET')) {
+    return
+  }
+  const meteorUser = await checkAuthorization(req, res)
+  if (!meteorUser) {
+    return
+  }
+  let projectId
+  try {
+    projectId = singleRouteParameter(req._parsedUrl?.pathname, '/project/users')
+  } catch (error) {
+    sendResponse(res, 400, 'Invalid project ID.')
+    return
+  }
+  const project = await checkProjectAccess(projectId, meteorUser._id, res)
+  if (!project) {
+    return
+  }
+  let userIds
+  try {
+    const userRows = await fetchBoundedAggregationList({
+      aggregate: (pipeline, options) => Timecards.rawCollection()
+        .aggregate(pipeline, options).toArray(),
+      pipeline: [
+        { $match: { projectId, userId: { $type: 'string' } } },
+        { $group: { _id: '$userId' } },
+        { $sort: { _id: 1 } },
+      ],
+    })
+    userIds = userRows
+      .map((row) => row._id)
+      .filter((userId) => typeof userId === 'string' && userId)
+  } catch (error) {
+    sendBoundedReadFailure(
+      res,
+      error,
+      `More than ${MAX_LEGACY_RESULT_LIMIT} users have time entries on this project.`,
+      'Project users could not be read.',
+    )
+    return
+  }
+  const member = isProjectMember(project, meteorUser._id)
+  const users = member ? await Meteor.users.find({
+    _id: { $in: userIds }, inactive: { $ne: true },
+  }, {
+    fields: { 'profile.name': 1 },
+    limit: MAX_LEGACY_RESULT_LIMIT,
+  }).fetchAsync() : []
+  const byId = new Map(users.map((user) => [user._id, publicUserIdentity(user)]))
+  const payload = userIds
+    .map((userId) => (member ? byId.get(userId) || { _id: userId, name: null }
+      : { _id: userId, name: null }))
+    .sort((left, right) => (left.name || '').localeCompare(right.name || '')
+      || left._id.localeCompare(right._id))
+  sendResponse(res, 200, 'Returning project users.', payload)
+})
+
+WebApp.handlers.use('/project/timeentriesfordaterange-page/', async (req, res) => {
+  if (!requireHttpMethod(req, res, 'GET')) return
+  const meteorUser = await checkAuthorization(req, res)
+  if (!meteorUser) return
+  let projectId; let from; let to; let dateRange; let project
+  try {
+    ;[projectId, from, to] = routeParameters(
+      req._parsedUrl?.pathname, '/project/timeentriesfordaterange-page', 3,
+    )
+    dateRange = dateOnlyRange(from, to)
+    assertDateRangeLimit(dateRange)
+  } catch (error) {
+    sendResponse(
+      res,
+      400,
+      `Invalid paginated project date-range request. A range may contain at most `
+        + `${MAX_DATE_RANGE_DAYS} days.`,
+    )
+    return
+  }
+  project = await checkProjectAccess(projectId, meteorUser._id, res)
+  if (!project) return
+  try {
+    const query = new URL(req.url || req._parsedUrl?.pathname || '/', 'http://local.invalid')
+      .searchParams
+    const page = await fetchTimeentryPage({
+      find: (selector, options) => Timecards.find(selector, options).fetchAsync(),
+      baseSelector: {
+        projectId,
+        date: { $gte: dateRange.startDate, $lte: dateRange.endDate },
+      },
+      scope: {
+        kind: 'project-timeentries', userId: meteorUser._id, projectId, from, to,
+        audience: isProjectMember(project, meteorUser._id) ? 'member' : 'public',
+      },
+      query,
+    })
+    page.items = page.items.map((timecard) => (
+      serializeProjectTimecard(timecard, project, meteorUser._id)
+    ))
+    sendResponse(res, 200, `Returning a page of project time entries from ${from} to ${to}.`, page)
+  } catch (error) {
+    if (error instanceof PaginationError) {
+      sendResponse(res, 400, 'Invalid page options or cursor.')
+    } else {
+      sendResponse(res, 500, 'The paginated project date-range request could not be completed.')
+    }
+  }
+})
+
+/**
+ * @api {get} /project/timeentriesfordaterange/:projectId/:fromDate/:toDate Get project
+ * time entries within a date range
+ * @apiDescription The inclusive date range may contain at most 366 days.
  * @apiName GetTimeEntriesForDateRange
  * @apiGroup Project
  *
  * @apiParam {String} projectId The ID of the project.
- * @apiParam {String} fromDate The start date of the range (ISO 8601 format).
- * @apiParam {String} toDate The end date of the range (ISO 8601 format).
+ * @apiParam {String} fromDate The start date of the range in YYYY-MM-DD format.
+ * @apiParam {String} toDate The end date of the range in YYYY-MM-DD format.
  *
- * @apiSuccess {Object[]} payload A list of time entries for the specified project and date range.
+ * @apiSuccess {Object[]} payload A list of time entries for the specified project and
+ * date range.
  * @apiSuccess {String} payload.projectId The ID of the project.
  * @apiSuccess {String} payload.date The date of the time entry.
  * @apiSuccess {Number} payload.hours The number of hours logged.
  * @apiSuccess {String} payload.description A description of the work done.
  *
  * @apiError (500) InvalidParameters Invalid parameters received.
+ * @apiError (413) ResultTooLarge More than 500 entries match; use the paginated endpoint.
  *
  * @apiExample {curl} Example usage:
  *     curl -i http://localhost:3000/project/timeentriesfordaterange/12345/2023-01-01/2023-01-31
  */
 WebApp.handlers.use('/project/timeentriesfordaterange/', async (req, res) => {
+  if (!requireHttpMethod(req, res, 'GET')) return
   const meteorUser = await checkAuthorization(req, res)
   if (!meteorUser) {
     return
   }
-  const { pathname } = req._parsedUrl
-  const url = pathname.split('/')
-  const projectId = url[3]
-  let fromDate
-  let toDate
+  let projectId; let from; let to; let dateRange
   try {
-    check(projectId, String)
-    const range = dateOnlyRange(url[4], url[5])
-    fromDate = range.startDate
-    toDate = range.endDate
+    ;[projectId, from, to] = routeParameters(
+      req._parsedUrl?.pathname, '/project/timeentriesfordaterange', 3,
+    )
+    dateRange = dateOnlyRange(from, to)
+    assertDateRangeLimit(dateRange)
   } catch (error) {
-    sendResponse(res, 500, `Invalid parameters received.${error}`)
+    sendResponse(
+      res,
+      400,
+      'Invalid project/date range. Use a project ID and two YYYY-MM-DD dates spanning at most '
+        + `${MAX_DATE_RANGE_DAYS} days.`,
+    )
     return
   }
 
@@ -338,11 +1507,30 @@ WebApp.handlers.use('/project/timeentriesfordaterange/', async (req, res) => {
     return
   }
 
-  const payload = await Timecards.find({
-    projectId,
-    date: { $gte: fromDate, $lte: toDate },
-  }).fetchAsync()
-  sendResponse(res, 200, `Returning project time entries for date range ${fromDate} to ${toDate}`, payload)
+  try {
+    const timecards = await fetchBoundedLegacyList({
+      find: (selector, options) => Timecards.find(selector, options).fetchAsync(),
+      baseSelector: {
+        projectId,
+        date: { $gte: dateRange.startDate, $lte: dateRange.endDate },
+      },
+      sort: { date: 1, _id: 1 },
+    })
+    const payload = timecards.map((timecard) => (
+      serializeProjectTimecard(timecard, project, meteorUser._id)
+    ))
+    sendResponse(
+      res, 200, `Returning project time entries for date range ${from} to ${to}`, payload,
+    )
+  } catch (error) {
+    sendBoundedReadFailure(
+      res,
+      error,
+      `This range contains more than ${MAX_LEGACY_RESULT_LIMIT} project time entries. `
+        + 'Use the paginated endpoint.',
+      'Project time entries for that range could not be read.',
+    )
+  }
 })
 
 /**
@@ -381,38 +1569,87 @@ WebApp.handlers.use('/project/timeentriesfordaterange/', async (req, res) => {
  *     curl -d '{"name":"api-test-project", "description":"fabians api project"}' -H "Content-Type: application/json" -H "Authorization: Token abcdefgHIJKLMNOP" -X POST http://localhost:3000/project/create
    */
 WebApp.handlers.use('/project/create/', async (req, res) => {
+  if (!requireStaticPath(req, res, '/project/create')) return
+  if (!requireHttpMethod(req, res, 'POST')) return
   const meteorUser = await checkAuthorization(req, res)
-  if (!meteorUser) {
+  if (!meteorUser) return
+  let json; let key
+  try {
+    if (!hasJsonContentType(req)) throw new TypeError()
+    json = assertExactKeys(
+      await getJson(req, { limit: '64kb' }), ['name'],
+      ['description', 'color', 'customer', 'rate', 'budget'],
+    )
+    if (typeof json.name !== 'string' || !json.name.trim() || !json.name.isWellFormed()
+      || [...json.name].length > 200
+      || (json.description != null && (typeof json.description !== 'string'
+        || !json.description.isWellFormed() || [...json.description].length > 50000))
+      || (json.color != null && (typeof json.color !== 'string'
+        || !/^#[\da-f]{6}$/i.test(json.color)))
+      || (json.customer != null && (typeof json.customer !== 'string'
+        || !json.customer.isWellFormed() || [...json.customer].length > 500))
+      || ['rate', 'budget'].some((field) => json[field] != null
+        && (typeof json[field] !== 'number' || !Number.isFinite(json[field])
+          || json[field] < 0))) throw new TypeError()
+    key = optionalIdempotencyKey(req)
+  } catch (error) {
+    if (sendIdempotencyFailure(res, error)) return
+    sendResponse(
+      res,
+      invalidJsonRequestStatus(req, error),
+      isPayloadTooLarge(error) ? 'Project create request is too large.' : 'Invalid project create request.',
+    )
     return
   }
-  let json
-  try {
-    json = await getJson(req)
-  } catch (e) {
-    sendResponse(res, 400, `Invalid JSON received. ${e}`)
+  const projectFields = { userId: meteorUser._id, name: json.name, projectRevision: 0 }
+  if (json.description != null) {
+    projectFields.description = json.description
+    projectFields.desc = json.description
   }
-  if (json) {
-    try {
-      check(json.name, String)
-      check(json.description, Match.Maybe(String))
-      check(json.color, Match.Maybe(String))
-      check(json.customer, Match.Maybe(String))
-      check(json.rate, Match.Maybe(Number))
-      check(json.budget, Match.Maybe(Number))
-    } catch (error) {
-      sendResponse(res, 500, `Invalid parameters received.${error}`)
-      return
+  for (const field of ['color', 'customer', 'rate', 'budget']) {
+    if (json[field] != null) projectFields[field] = json[field]
+  }
+  try {
+    let payload
+    if (key) {
+      const operation = await executeIdempotentCreate({
+        key,
+        userId: meteorUser._id,
+        operation: 'project.create',
+        normalizedRequest: projectFields,
+        store: getIdempotencyStore(),
+        create: async (projectId) => {
+          const result = await insertAPIProjectWithId(projectFields, projectId)
+          return { projectId: result.projectId }
+        },
+        recover: async (projectId) => {
+          const result = await recoverAPIProjectWithId(projectFields, projectId)
+          return result ? { projectId: result.projectId } : null
+        },
+      })
+      setIdempotencyResponseHeaders(res, operation)
+      payload = operation.result
+    } else {
+      payload = { projectId: await Projects.insertAsync(projectFields) }
     }
-    json.userId = meteorUser._id
-    const projectId = await Projects.insertAsync(json)
-    const payload = {}
-    payload.projectId = projectId
-    sendResponse(res, 200, 'Project created.', payload)
+    sendResponse(res, 200, key ? 'Project create result returned.' : 'Project created.', payload)
+  } catch (error) {
+    if (sendIdempotencyFailure(res, error)) return
+    sendResponse(
+      res,
+      500,
+      key
+        ? 'Project creation could not be confirmed. Retry only with the same Idempotency-Key.'
+        : 'Project creation could not be confirmed. Inspect saved projects before retrying.',
+    )
   }
 })
 /**
    * @api {post} /timer/start/ Start a new timer
    * @apiDescription Starts a new timer for the API user if there is no current running timer.
+   * A caller-supplied operationId can reconcile the same active timer after a lost response.
+   * Once that timer is stopped, its operationId remains consumed for the advertised seven-day
+   * recovery window and cannot start a second timer.
    * @apiName startTimer
    * @apiGroup TimeEntry
    *
@@ -425,28 +1662,28 @@ WebApp.handlers.use('/project/create/', async (req, res) => {
     *    "startTime": "Sat Jun 26 2021 21:48:11 GMT+0200"
     *  }
     * }
-   * @apiError {json} response There is already another running timer.
+   * @apiError {json} response There is another running timer, the state changed, or this
+   * operationId was already consumed by a stopped timer.
     *      @apiErrorExample {json} Error-Response:
-    *     HTTP/1.1 500 Internal Server Error
+    *     HTTP/1.1 409 Conflict
     *     {
-    *       "message": "There is already another running timer."
+    *       "statusCode": 409,
+    *       "message": "This timer start operation was already used.",
+    *       "payload": { "code": "timer-operation-consumed" }
     *     }
    * @apiUse AuthError
    */
-WebApp.handlers.use('/timer/start/', async (req, res) => {
-  const meteorUser = await checkAuthorization(req, res)
-  if (!meteorUser) {
-    return
-  }
-  const payload = {}
-  if (!meteorUser.profile.timer) {
-    payload.startTime = meteorUser.profile.timer
-    await Meteor.users.updateAsync({ _id: meteorUser._id }, { $set: { 'profile.timer': new Date() } })
-    sendResponse(res, 200, 'New timer started.', payload)
-  } else {
-    sendResponse(res, 500, 'There is already another running timer.')
-  }
-})
+const timerTransitionDependencies = {
+  findUser: (selector) => Meteor.users.findOneAsync(selector),
+  updateOne: (selector, modifier) => Meteor.users.rawCollection().updateOne(selector, modifier),
+}
+
+WebApp.handlers.use('/timer/start/', createTimerStartHandler({
+  authorize: checkAuthorization,
+  readJson: getJson,
+  startTimer: (options) => startTimerAtomic(options, timerTransitionDependencies),
+  sendResponse,
+}))
 
 /**
    * @api {get} /timer/get/ Get the duration of the current timer
@@ -472,22 +1709,11 @@ WebApp.handlers.use('/timer/start/', async (req, res) => {
     *     }
    * @apiUse AuthError
    */
-WebApp.handlers.use('/timer/get/', async (req, res) => {
-  const meteorUser = await checkAuthorization(req, res)
-  if (!meteorUser) {
-    return
-  }
-  const payload = {}
-  if (meteorUser.profile.timer) {
-    payload.startTime = meteorUser.profile.timer
-    const currentTime = new Date()
-    const timerTime = new Date(meteorUser.profile.timer)
-    payload.duration = currentTime.getTime() - timerTime.getTime()
-    sendResponse(res, 200, 'Running timer received.', payload)
-  } else {
-    sendResponse(res, 500, 'No running timer found.')
-  }
-})
+WebApp.handlers.use('/timer/get/', createTimerGetHandler({
+  authorize: checkAuthorization,
+  getTimer: (options) => getTimerState(options, timerTransitionDependencies),
+  sendResponse,
+}))
 /**
    * @api {post} /timer/stop/ Stop a running timer
    * @apiDescription Stop a running timer of the API user and return the start timestamp and duration in milliseconds.
@@ -512,23 +1738,13 @@ WebApp.handlers.use('/timer/get/', async (req, res) => {
     *     }
    * @apiUse AuthError
    */
-WebApp.handlers.use('/timer/stop/', async (req, res) => {
-  const meteorUser = await checkAuthorization(req, res)
-  if (!meteorUser) {
-    return
-  }
-  const payload = {}
-  if (meteorUser.profile.timer) {
-    payload.startTime = meteorUser.profile.timer
-    const currentTime = new Date()
-    const timerTime = new Date(meteorUser.profile.timer)
-    payload.duration = currentTime.getTime() - timerTime.getTime()
-    await Meteor.users.updateAsync({ _id: meteorUser._id }, { $unset: { 'profile.timer': '' } })
-    sendResponse(res, 200, 'Running timer stopped.', payload)
-  } else {
-    sendResponse(res, 500, 'No running timer found.')
-  }
-})
+WebApp.handlers.use('/timer/stop/', createTimerStopHandler({
+  authorize: checkAuthorization,
+  readJson: getJson,
+  getTimer: (options) => getTimerState(options, timerTransitionDependencies),
+  stopTimer: (options) => stopTimerAtomic(options, timerTransitionDependencies),
+  sendResponse,
+}))
 
 /**
  * @api {post} /project/task/create Create a predefined task for a project
@@ -563,52 +1779,112 @@ WebApp.handlers.use('/timer/stop/', async (req, res) => {
  * @apiUse AuthError
  */
 WebApp.handlers.use('/project/task/create/', async (req, res) => {
+  if (!requireStaticPath(req, res, '/project/task/create')) return
+  if (!requireHttpMethod(req, res, 'POST')) return
   const meteorUser = await checkAuthorization(req, res)
-  if (!meteorUser) {
-    return
-  }
-  let json
+  if (!meteorUser) return
+  let json; let start; let end; let key
   try {
-    json = await getJson(req)
-  } catch (e) {
-    sendResponse(res, 400, `Invalid JSON received. ${e}`)
-  }
-  if (json) {
-    try {
-      check(json.projectId, String)
-      check(json.name, String)
-      check(new Date(json.start), Date)
-      check(new Date(json.end), Date)
-      check(json.estimatedHours, Match.Maybe(Number))
-      check(json.dependencies, Match.Maybe([String]))
-      check(json.customfields, Match.Maybe(Object))
-    } catch (error) {
-      sendResponse(res, 500, `Invalid parameters received.${error}`)
-      return
+    if (!hasJsonContentType(req)) throw new TypeError()
+    json = assertExactKeys(
+      await getJson(req, { limit: '64kb' }), ['projectId', 'name', 'start', 'end'],
+      ['estimatedHours', 'dependencies', 'customfields'],
+    )
+    start = parseCanonicalUTCMillisecondTimestamp(json.start)
+    end = parseCanonicalUTCMillisecondTimestamp(json.end)
+    const dependencies = json.dependencies ?? []
+    if (typeof json.projectId !== 'string' || !json.projectId || json.projectId.length > 128
+      || typeof json.name !== 'string' || !json.name.trim() || !json.name.isWellFormed()
+      || [...json.name].length > 1000
+      || start > end
+      || (json.estimatedHours != null && (typeof json.estimatedHours !== 'number'
+        || !Number.isFinite(json.estimatedHours) || json.estimatedHours < 0))
+      || !Array.isArray(dependencies) || dependencies.length > 500
+      || dependencies.some((id) => typeof id !== 'string' || !id || id.length > 128)
+      || new Set(dependencies).size !== dependencies.length
+      || (json.customfields != null && (!json.customfields
+        || typeof json.customfields !== 'object' || Array.isArray(json.customfields)))) {
+      throw new TypeError()
     }
-
-    // Check if user has access to the project
-    const project = await checkProjectAccess(json.projectId, meteorUser._id, res)
-    if (!project) {
-      return
-    }
-
-    const safeCustomfields = sanitizeObject(json.customfields, taskForbiddenCustomfieldKeys)
-    const taskId = await Tasks.insertAsync({
-      ...safeCustomfields,
-      projectId: json.projectId,
-      name: json.name,
-      start: new Date(json.start),
-      end: new Date(json.end),
-      estimatedHours: json.estimatedHours,
-      dependencies: json.dependencies,
-    })
-
-    const payload = { taskId }
-    sendResponse(res, 200, 'Task created.', payload)
+    json.dependencies = dependencies
+    key = optionalIdempotencyKey(req)
+  } catch (error) {
+    if (sendIdempotencyFailure(res, error)) return
+    sendResponse(
+      res,
+      invalidJsonRequestStatus(req, error),
+      isPayloadTooLarge(error) ? 'Project task create request is too large.' : 'Invalid project task create request.',
+    )
     return
   }
-  sendResponse(res, 500, 'Missing mandatory parameters.')
+  const taskFields = {
+    ...sanitizeObject(json.customfields, taskForbiddenCustomfieldKeys),
+    projectId: json.projectId,
+    name: json.name,
+    start,
+    end,
+    estimatedHours: json.estimatedHours,
+    dependencies: json.dependencies,
+    projectTaskRevision: 0,
+  }
+  try {
+    let payload
+    if (key) {
+      const operation = await executeIdempotentCreate({
+        key,
+        userId: meteorUser._id,
+        operation: 'project-task.create',
+        normalizedRequest: taskFields,
+        store: getIdempotencyStore(),
+        beforeCreate: () => checkAPIProjectTaskCreateGuards(
+          json.projectId, json.dependencies, meteorUser._id,
+        ),
+        create: async (taskId) => {
+          const result = await createAPIProjectTaskWithFence({
+            projectId: json.projectId,
+            userId: meteorUser._id,
+            taskFields,
+            taskId,
+          })
+          return result.payload
+        },
+        recover: async (taskId) => {
+          const result = await recoverAPIProjectTaskWithId(taskFields, taskId)
+          return result ? { taskId: result.taskId } : null
+        },
+      })
+      setIdempotencyResponseHeaders(res, operation)
+      payload = operation.result
+    } else {
+      await checkAPIProjectTaskCreateGuards(
+        json.projectId, json.dependencies, meteorUser._id,
+      )
+      const result = await createAPIProjectTaskWithFence({
+        projectId: json.projectId,
+        userId: meteorUser._id,
+        taskFields,
+      })
+      payload = result.payload
+    }
+    sendResponse(res, 200, key ? 'Task create result returned.' : 'Task created.', payload)
+  } catch (error) {
+    if (sendIdempotencyFailure(res, error)) return
+    if (error?.error === 'api-project-task-admin-required') {
+      sendResponse(res, 403, 'Project administrator access is required.')
+    } else if (['project-child-write-blocked', 'project-child-fence-invalid'].includes(error?.error)) {
+      sendResponse(res, 409, 'The project is being deleted or cannot currently accept tasks.')
+    } else if (error?.error === 'project-task-invalid') {
+      sendResponse(res, 400, 'A project task dependency is invalid.')
+    } else {
+      sendResponse(
+        res,
+        500,
+        key
+          ? 'Task creation could not be confirmed. Retry only with the same Idempotency-Key.'
+          : 'Task creation could not be confirmed. Inspect saved tasks before retrying.',
+      )
+    }
+  }
 })
 
 /**
@@ -620,16 +1896,22 @@ WebApp.handlers.use('/project/task/create/', async (req, res) => {
  * @apiHeader {String} Token The authorization header Bearer API token.
  * @apiParam {String} projectId The ID of the project to list tasks for.
  * @apiSuccess {json} response An array of tasks for the specified project.
+ * @apiError (413) ResultTooLarge More than 500 predefined tasks exist for the project.
  * @apiUse AuthError
  */
 WebApp.handlers.use('/project/tasks/', async (req, res) => {
+  if (!requireHttpMethod(req, res, 'GET')) return
   const meteorUser = await checkAuthorization(req, res)
   if (!meteorUser) {
     return
   }
-  const { pathname } = req._parsedUrl
-  const url = pathname.split('/')
-  const projectId = url[3]
+  let projectId
+  try {
+    projectId = singleRouteParameter(req._parsedUrl?.pathname, '/project/tasks')
+  } catch (error) {
+    sendResponse(res, 400, 'Invalid project ID.')
+    return
+  }
 
   // Check if user has access to the project
   const project = await checkProjectAccess(projectId, meteorUser._id, res)
@@ -637,8 +1919,21 @@ WebApp.handlers.use('/project/tasks/', async (req, res) => {
     return
   }
 
-  const payload = await Tasks.find({ projectId }).fetchAsync()
-  sendResponse(res, 200, 'Returning tasks for project', payload)
+  try {
+    const tasks = await fetchBoundedLegacyList({
+      find: (selector, options) => Tasks.find(selector, options).fetchAsync(),
+      baseSelector: { projectId },
+      sort: { _id: 1 },
+    })
+    sendResponse(res, 200, 'Returning tasks for project', tasks.map(serializeProjectTask))
+  } catch (error) {
+    sendBoundedReadFailure(
+      res,
+      error,
+      `This project has more than ${MAX_LEGACY_RESULT_LIMIT} predefined tasks.`,
+      'Project tasks could not be read.',
+    )
+  }
 })
 
 /**
@@ -650,16 +1945,22 @@ WebApp.handlers.use('/project/tasks/', async (req, res) => {
  * @apiHeader {String} Token The authorization header Bearer API token.
  * @apiParam {String} projectId The ID of the project to get task statistics for.
  * @apiSuccess {json} response Task statistics with planned vs actual hours.
+ * @apiError (413) ResultTooLarge More than 500 predefined tasks exist for the project.
  * @apiUse AuthError
  */
 WebApp.handlers.use('/project/task/stats/', async (req, res) => {
+  if (!requireHttpMethod(req, res, 'GET')) return
   const meteorUser = await checkAuthorization(req, res)
   if (!meteorUser) {
     return
   }
-  const { pathname } = req._parsedUrl
-  const url = pathname.split('/')
-  const projectId = url[4]
+  let projectId
+  try {
+    projectId = singleRouteParameter(req._parsedUrl?.pathname, '/project/task/stats')
+  } catch (error) {
+    sendResponse(res, 400, 'Invalid project ID.')
+    return
+  }
 
   // Check if user has access to the project
   const project = await checkProjectAccess(projectId, meteorUser._id, res)
@@ -667,184 +1968,66 @@ WebApp.handlers.use('/project/task/stats/', async (req, res) => {
     return
   }
 
-  const tasks = await Tasks.find({ projectId }).fetchAsync()
-
-  // Get actual hours from timecards for each task
-  const taskStats = await Promise.all(tasks.map(async (task) => {
-    const actualHours = await Timecards.rawCollection().aggregate([
-      { $match: { projectId, task: task.name } },
-      { $group: { _id: null, totalHours: { $sum: '$hours' } } },
-    ]).toArray()
-
-    return {
-      taskId: task._id,
-      taskName: task.name,
-      estimatedHours: task.estimatedHours || 0,
-      actualHours: actualHours[0]?.totalHours || 0,
-      variance: (actualHours[0]?.totalHours || 0) - (task.estimatedHours || 0),
-      start: task.start,
-      end: task.end,
-    }
-  }))
-
-  const payload = {
-    projectId,
-    totalEstimatedHours: taskStats.reduce((sum, task) => sum + task.estimatedHours, 0),
-    totalActualHours: taskStats.reduce((sum, task) => sum + task.actualHours, 0),
-    tasks: taskStats,
+  try {
+    const payload = await fetchBoundedProjectTaskStats({
+      projectId,
+      findTasks: (selector, options) => Tasks.find(selector, options).fetchAsync(),
+      aggregateTimecards: (pipeline, options) => Timecards.rawCollection()
+        .aggregate(pipeline, options).toArray(),
+    })
+    sendResponse(res, 200, 'Returning task statistics for project', payload)
+  } catch (error) {
+    sendBoundedReadFailure(
+      res,
+      error,
+      `Task statistics are limited to ${MAX_LEGACY_RESULT_LIMIT} predefined tasks.`,
+      'Project task statistics could not be read.',
+    )
   }
-
-  sendResponse(res, 200, 'Returning task statistics for project', payload)
 })
 
 /**
- * @api {post} /user/action-verification/webhook User Action Verification Webhook
- * @apiName userActionVerificationWebhook
- * @apiDescription Webhook endpoint for external services to manage user verification status
- * @apiGroup UserVerification
+ * @api {get} /user/me Get current user
+ * @apiDescription Return the ID and display name of the user assigned to the API token.
+ * @apiName getCurrentUser
+ * @apiGroup User
  *
- * @apiBody {Object} Any webhook payload - processing depends on configured webhook verification interface
- * @apiParamExample {json} Stripe-Example:
- *                  {
- *                    "type": "checkout.session.completed",
- *                    "data": {
- *                      "object": {
- *                        "client_reference_id": "abc123def456"
- *                      }
- *                    }
- *                  }
- * @apiSuccess {json} response Confirmation of webhook processing.
- * @apiSuccessExample {json} Success response:
- * {
- *  message: "Webhook processed successfully."
- *  }
- * @apiError (400) InvalidJSON Invalid JSON received.
- * @apiError (403) DomainNotAllowed Sender domain not whitelisted.
- * @apiError (404) NoActiveInterface No active webhook verification interface found.
- * @apiError (500) ProcessingError Error processing webhook data.
+ * @apiHeader {String} Token The authorization header Bearer API token.
+ * @apiSuccess {Object} payload The authenticated user's ID and display name.
+ * @apiUse AuthError
  */
-WebApp.handlers.use('/user/action-verification/webhook/', async (req, res) => {
-  let json
-  try {
-    json = await getJson(req)
-  } catch (e) {
-    sendResponse(res, 400, `Invalid JSON received. ${e}`)
+WebApp.handlers.use('/user/me/', async (req, res) => {
+  if (!requireStaticPath(req, res, '/user/me')) return
+  if (!requireHttpMethod(req, res, 'GET')) {
     return
   }
-
-  if (json) {
-    // Get sender domain/IP from request headers for validation
-    let senderDomain = req.headers['x-forwarded-for']
-                      || req.headers['x-real-ip']
-                      || req.connection.remoteAddress
-                      || req.socket.remoteAddress
-                      || (req.connection.socket ? req.connection.socket.remoteAddress : null)
-                      || 'unknown'
-
-    // If we have a reverse DNS lookup result or explicit domain header, use that
-    if (req.headers['x-forwarded-host']) {
-      senderDomain = req.headers['x-forwarded-host']
-    } else if (req.headers.host) {
-      senderDomain = req.headers.host
-    }
-    senderDomain = normalizeDomain(senderDomain)
-    try {
-      // Import required modules
-      const WebhookVerification = (await import('../imports/api/webhookverification/webhookverification.js')).default
-      const { processWebhookVerification } = await import('../imports/api/webhookverification/server/methods.js')
-      const { getGlobalSettingAsync } = await import('../imports/utils/server_method_helpers.js')
-
-      // Check if user action verification is enabled
-      const verificationEnabled = await getGlobalSettingAsync('enableUserActionVerification')
-      if (!verificationEnabled) {
-        sendResponse(res, 404, 'User action verification is not enabled.')
-        return
-      }
-
-      // Find active webhook verification interface
-      const activeInterface = await WebhookVerification.findOneAsync({ active: true })
-      if (!activeInterface) {
-        sendResponse(res, 404, 'No active webhook verification interface found.')
-        return
-      }
-
-      // Check if sender domain/IP is allowed (support both domains and IP addresses)
-      const allowedDomains = activeInterface.allowedDomains.split(',').map((d) => d.trim())
-      const isAllowed = allowedDomains.some((allowed) => {
-        // Exact match for domains or IPs
-        if (senderDomain === allowed) return true
-        // Support localhost variations for development
-        if (allowed === 'localhost' && (senderDomain.includes('localhost') || senderDomain.includes('127.0.0.1'))) return true
-        // Support wildcard matching for subdomains (*.example.com matches both subdomain.example.com and example.com)
-        if (allowed.startsWith('*.')) {
-          const domain = allowed.substring(2) // Remove *.
-          return senderDomain === domain || senderDomain.endsWith(`.${domain}`)
-        }
-        return false
-      })
-
-      if (!isAllowed) {
-        sendResponse(res, 403, `Sender ${senderDomain} not whitelisted for webhook verification.`)
-        return
-      }
-
-      // Process webhook using custom code
-      const result = await Meteor.callAsync('webhookverification.process', {
-        _id: activeInterface._id,
-        webhookData: json,
-        senderDomain,
-      })
-
-      if (!result || !result.action || !result.userId) {
-        sendResponse(res, 200, 'Webhook received but no action required.')
-        return
-      }
-
-      // Find user
-      const user = await Meteor.users.findOneAsync({
-        _id: result.userId,
-        'actionVerification.required': true,
-      })
-
-      if (!user) {
-        sendResponse(res, 404, 'User not found or verification not required.')
-        return
-      }
-
-      if (result.action === 'complete') {
-        // Mark verification as completed
-        await Meteor.users.updateAsync({ _id: result.userId }, {
-          $set: {
-            'actionVerification.completed': true,
-            'actionVerification.completedAt': new Date(),
-          },
-        })
-        sendResponse(res, 200, 'User action verification completed successfully.')
-      } else if (result.action === 'revoke') {
-        // Get verification period from the webhook interface and calculate new deadline
-        const verificationPeriod = activeInterface.verificationPeriod || 30
-        const newDeadline = new Date()
-        newDeadline.setDate(newDeadline.getDate() + verificationPeriod)
-
-        // Revoke verification
-        await Meteor.users.updateAsync({ _id: result.userId }, {
-          $set: {
-            'actionVerification.completed': false,
-            'actionVerification.deadline': newDeadline,
-          },
-          $unset: {
-            'actionVerification.completedAt': '',
-          },
-        })
-        sendResponse(res, 200, 'User action verification revoked successfully.')
-      } else {
-        sendResponse(res, 400, 'Invalid action specified. Must be "complete" or "revoke".')
-      }
-    } catch (error) {
-      console.error('Webhook processing error:', error)
-      sendResponse(res, 500, `Error processing webhook: ${error.message}`)
-    }
-  } else {
-    sendResponse(res, 400, 'Missing webhook payload.')
+  const meteorUser = await checkAuthorization(req, res)
+  if (!meteorUser) {
+    return
   }
+  sendResponse(res, 200, 'Returning current user.', publicUserIdentity(meteorUser))
 })
+
+/**
+ * @api {post} /user/action-verification/webhook/:endpointId Signed action-verification webhook
+ * @apiName userActionVerificationWebhook
+ * @apiDescription Accepts only an enabled declarative interface with an environment-supplied
+ * HMAC-SHA256 secret. Host and forwarded-host headers are never sender credentials. Successful
+ * applied and ignored events deliberately return the same generic response. A retry re-signs the
+ * exact event ID and body with a fresh authentication timestamp; unfinished work remains bound to
+ * the first accepted timestamp and interface configuration revision.
+ * @apiGroup UserVerification
+ * @apiParam {String} endpointId Random public endpoint identity configured by an administrator.
+ * @apiHeader {String} X-Titra-Webhook-Timestamp Unix timestamp in the signature input.
+ * @apiHeader {String} X-Titra-Webhook-Event-Id Bounded provider event identity for replay protection.
+ * @apiHeader {String} X-Titra-Webhook-Signature HMAC-SHA256 over timestamp, a dot, and exact body bytes.
+ * @apiSuccess (202) {Boolean} payload.accepted Always true for valid applied or ignored events.
+ * @apiError (400) BadRequest Invalid JSON or request shape.
+ * @apiError (401) AuthenticationFailed Missing interface, deployment secret, or valid signature.
+ * @apiError (409) ReplayConflict Event identity reused with a different body, or unfinished work
+ * was claimed under a different interface configuration revision.
+ * @apiError (413) PayloadTooLarge Body exceeds the advertised limit.
+ * @apiError (415) UnsupportedMediaType Content-Type is not application/json.
+ * @apiError (503) Processing An earlier delivery is still inside its processing lease.
+ */
+WebApp.handlers.use(WEBHOOK_PATH, webhookVerificationHandler)

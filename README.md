@@ -42,6 +42,9 @@ Checkout our [wiki](https://wiki.titra.io) for best practices and to learn how t
 Contributors working with time-entry dates should also see the
 [time-entry date storage contract](docs/timecard-date-storage.md).
 
+HTTP API clients and integrators should see the
+[expanded API and safety contract](docs/api-v2.md).
+
 
 
 Built with ❤️ in 🇦🇹

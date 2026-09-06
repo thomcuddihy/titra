@@ -280,7 +280,10 @@
     "user_action_verification_url_param": "Ім'я URL-параметра верифікації дій користувача",
     "user_action_verification_type": "Тип верифікації дій користувача",
     "custom_logo": "Користувацький логотип (URL або Data URI)",
-    "enable_googleapi": "Активувати інтеграцію Google Workspace?"
+    "enable_googleapi": "Активувати інтеграцію Google Workspace?",
+    "titra_api_token": "API-токен titra",
+    "generate_api_token": "Створити заміну",
+    "api_token_write_only_help": "Наявні токени приховано. Залиште поле порожнім, щоб зберегти поточний токен, або створіть новий і скопіюйте його перед виходом із цієї сторінки."
   },
   "verification": {
     "overdue_title": "Потрібна дія - Прострочено",
@@ -473,7 +476,8 @@
     "user_inactive": "Цього користувача було деактивовано, будь ласка, активуйте його, щоб продовжити.",
     "extensionAlreadyLaunched": "Розширення вже запущено.",
     "no_entry_selected": "Не вибрано жодного запису. Будь ласка, виберіть принаймні один запис, щоб продовжити.",
-    "unknown_error": "Невідома помилка. Будь ласка, спробуйте ще раз."
+    "unknown_error": "Невідома помилка. Будь ласка, спробуйте ще раз.",
+    "timecard_migration_locked": "Time-entry changes are temporarily paused while an administrator migrates legacy dates. Please try again when the migration has finished."
   },
   "login": {
     "400": "Неможливо увійти, спробуйте ще раз.",
@@ -565,8 +569,18 @@
     "allowed_domains": "Дозволені домени",
     "allowed_domains_hint": "Список доменів через кому, яким дозволено надсилати webhooks (наприклад: api.stripe.com, webhook.example.com)",
     "webhook_process_data": "Скрипт обробки webhook",
-    "webhook_processdata_hint": "Цей JavaScript буде виконуватися кожного разу при отриманні webhook. Скрипт має доступ до змінних 'webhookData' (корисне навантаження webhook) та 'senderDomain'. Поверніть об'єкт з властивостями 'action' ('complete' або 'revoke') та 'userId' для обробки верифікації, або null для ігнорування webhook.",
-    "confirm_delete": "Ви впевнені, що хочете видалити цей елемент?"
+    "webhook_processdata_hint": "Застарілі скрипти вимкнено для захищених webhook-інтерфейсів.",
+    "confirm_delete": "Ви впевнені, що хочете видалити цей елемент?",
+    "webhook_security_hint": "Секрети webhook задаються лише через показану змінну середовища і не вводяться та не зберігаються тут. Новий або переналаштований інтерфейс лишається неактивним до перезапуску з коректним секретом.",
+    "webhook_mapping_rules": "Декларативні правила зіставлення (JSON)",
+    "webhook_mapping_rules_hint": "Використовуйте вказівники RFC 6901 для події та ID користувача. Кожне правило вибирає complete або revoke; JavaScript не приймається.",
+    "webhook_mapping_rules_invalid": "Правила мають бути коректним масивом JSON.",
+    "webhook_endpoint": "ID кінцевої точки",
+    "webhook_readiness": "Готовність захисту",
+    "webhook_ready": "Готово",
+    "webhook_not_ready": "Не готово",
+    "webhook_legacy": "Застарілий формат вимкнено",
+    "webhook_referenced_users": "пов’язаних користувачів"
   },
   "wekan": {
     "list": "Список Wekan",

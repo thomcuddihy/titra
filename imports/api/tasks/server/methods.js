@@ -1,12 +1,52 @@
 import { ValidatedMethod } from 'meteor/mdg:validated-method'
 import { check, Match } from 'meteor/check'
 import Tasks from '../tasks.js'
+import Projects from '../../projects/projects.js'
+import Timecards from '../../timecards/timecards.js'
 import { sanitizeObject } from '../../../utils/sanitizer.js'
 import { authenticationMixin, transactionLogMixin } from '../../../utils/server_method_helpers.js'
+import {
+  createProjectChildWithFence,
+  definiteProjectChildNoWrite,
+  runWithProjectChildWriter,
+} from '../../projects/server/projectChildFence.js'
+import { deleteProjectTaskWithFence, taskRecoveryFingerprint } from './taskGraphFence.js'
+import { isDefaultProjectTask } from '../../projects/server/ddpMutationGuards.js'
 
 const taskForbiddenCustomfieldKeys = new Set([
   '_id', 'projectId', 'name', 'start', 'end', 'estimatedHours', 'dependencies', 'isDefaultTask', 'userId', 'createdAt', 'updatedAt',
 ])
+
+async function requireProjectAdministrator(projectId, userId) {
+  const project = await Projects.findOneAsync({
+    _id: projectId,
+    lifecycleLock: { $exists: false },
+    $or: [{ userId }, { admins: userId }],
+  })
+  if (!project) throw new Meteor.Error('not-authorized')
+  return project
+}
+
+const projectChildFenceDependencies = {
+  findOneAndUpdate: (...args) => Projects.rawCollection().findOneAndUpdate(...args),
+  findOne: (selector) => Projects.findOneAsync(selector),
+  updateOne: (selector, modifier) => Projects.rawCollection().updateOne(selector, modifier),
+}
+
+function projectAdministratorSelector(projectId, userId) {
+  return { _id: projectId, $or: [{ userId }, { admins: userId }] }
+}
+
+async function validateProjectTaskDependencies(projectId, dependencies = [], taskId) {
+  if (dependencies.includes(taskId)) throw new Meteor.Error('notifications.task_not_found')
+  if (new Set(dependencies).size !== dependencies.length) {
+    throw new Meteor.Error('notifications.task_not_found')
+  }
+  const count = await Tasks.find({
+    _id: { $in: dependencies }, projectId,
+  }).countAsync()
+  if (count !== new Set(dependencies).size) throw new Meteor.Error('notifications.task_not_found')
+}
 
 /**
 Inserts a new project task into the Tasks collection.
@@ -35,15 +75,40 @@ const insertProjectTask = new ValidatedMethod({
   async run({
     projectId, name, start, end, estimatedHours, dependencies, customfields,
   }) {
-    await Tasks.insertAsync({
-      ...sanitizeObject(customfields, taskForbiddenCustomfieldKeys),
+    // Resolve deterministic validation failures before reserving the project;
+    // once the insert starts, any thrown driver result is outcome-unknown and
+    // the reservation must remain until recovery/operator inspection.
+    await validateProjectTaskDependencies(projectId, dependencies)
+    const taskId = Random.id()
+    await createProjectChildWithFence({
+      selector: projectAdministratorSelector(projectId, this.userId),
       projectId,
-      name,
-      start,
-      end,
-      estimatedHours,
-      dependencies,
-    })
+      reservationId: `task:${taskId}`,
+      kind: 'project-task-create',
+      resourceId: taskId,
+      createChild: async () => {
+        try {
+          await validateProjectTaskDependencies(projectId, dependencies)
+        } catch (error) {
+          throw definiteProjectChildNoWrite(error)
+        }
+        await Tasks.insertAsync({
+          _id: taskId,
+          ...sanitizeObject(customfields, taskForbiddenCustomfieldKeys),
+          projectId,
+          name,
+          start,
+          end,
+          estimatedHours,
+          dependencies,
+          projectTaskRevision: 0,
+        })
+        return { resourceId: taskId, created: true }
+      },
+      removeCreatedChild: (resourceId) => Tasks.rawCollection().deleteOne({
+        _id: resourceId, projectId,
+      }),
+    }, projectChildFenceDependencies)
   },
 })
 /**
@@ -75,18 +140,50 @@ const updateTask = new ValidatedMethod({
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({
-    taskId, name, start, end, estimatedHours, dependencies, customfields,
+    taskId, projectId, name, start, end, estimatedHours, dependencies, customfields,
   }) {
-    await Tasks.updateAsync(taskId, {
-      $set: {
-        ...sanitizeObject(customfields, taskForbiddenCustomfieldKeys),
-        name,
-        start,
-        end,
-        estimatedHours,
-        dependencies,
+    const task = await Tasks.findOneAsync({ _id: taskId, projectId: { $exists: true } })
+    if (!task || (projectId && projectId !== task.projectId)) throw new Meteor.Error('not-authorized')
+    const project = await requireProjectAdministrator(task.projectId, this.userId)
+    if (isDefaultProjectTask(project, task) && name !== undefined && name !== task.name) {
+      throw new Meteor.Error('notifications.task_is_default')
+    }
+    const result = await runWithProjectChildWriter({
+      selector: projectAdministratorSelector(task.projectId, this.userId),
+      projectId: task.projectId,
+      reservationId: `task-update:${taskId}:${Random.id()}`,
+      kind: 'project-task-update',
+      resourceId: taskId,
+      operation: async () => {
+        try {
+          const currentProject = await Projects.findOneAsync({ _id: task.projectId })
+          if (!currentProject) throw new Meteor.Error('not-authorized')
+          if (isDefaultProjectTask(currentProject, task)
+            && name !== undefined && name !== task.name) {
+            throw new Meteor.Error('notifications.task_is_default')
+          }
+        } catch (error) {
+          throw definiteProjectChildNoWrite(error)
+        }
+        try {
+          await validateProjectTaskDependencies(task.projectId, dependencies, taskId)
+        } catch (error) {
+          throw definiteProjectChildNoWrite(error)
+        }
+        return Tasks.rawCollection().updateOne({ _id: taskId, projectId: task.projectId }, {
+          $set: {
+            ...sanitizeObject(customfields, taskForbiddenCustomfieldKeys),
+            name,
+            start,
+            end,
+            estimatedHours,
+            dependencies,
+          },
+          $inc: { projectTaskRevision: 1 },
+        })
       },
-    })
+    }, projectChildFenceDependencies)
+    if (result?.matchedCount !== 1) throw new Meteor.Error('not-authorized')
   },
 })
 /**
@@ -105,7 +202,41 @@ const removeProjectTask = new ValidatedMethod({
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({ taskId }) {
-    await Tasks.removeAsync({ _id: taskId })
+    const task = await Tasks.findOneAsync({ _id: taskId, projectId: { $exists: true } })
+    if (!task) throw new Meteor.Error('not-authorized')
+    const project = await requireProjectAdministrator(task.projectId, this.userId)
+    const result = await deleteProjectTaskWithFence({
+      projectSelector: projectAdministratorSelector(task.projectId, this.userId),
+      projectId: task.projectId,
+      taskId,
+      taskName: task.name,
+      taskFingerprint: taskRecoveryFingerprint(task),
+      lockId: `task-delete:${taskId}:${Random.id()}`,
+      // The established DDP action deletes only the predefined suggestion;
+      // historical string-valued timecards remain intentionally unchanged.
+      acknowledgeRecordedEntries: true,
+      inspectLockedState: async () => {
+        const [currentTask, currentProject, dependentTaskCount, recordCount] = await Promise.all([
+          Tasks.findOneAsync({ _id: taskId, projectId: task.projectId, name: task.name }),
+          Projects.findOneAsync({ _id: task.projectId }),
+          Tasks.find({ projectId: task.projectId, dependencies: taskId }).countAsync(),
+          Timecards.find({ projectId: task.projectId, task: task.name }).countAsync(),
+        ])
+        return {
+          conflict: !currentTask || !currentProject,
+          isDefault: currentTask?.isDefaultTask === true
+            || currentProject?.defaultTask === task.name,
+          dependentTaskCount,
+          recordCount,
+        }
+      },
+      deleteTask: () => Tasks.rawCollection().deleteOne({
+        _id: taskId, projectId: task.projectId, name: task.name,
+      }),
+    }, projectChildFenceDependencies)
+    if (result.status === 'default') throw new Meteor.Error('notifications.task_is_default')
+    if (result.status === 'dependent') throw new Meteor.Error('notifications.task_has_dependencies')
+    if (result.status !== 'deleted') throw new Meteor.Error('not-authorized')
   },
 })
 

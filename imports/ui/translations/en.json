@@ -277,7 +277,10 @@
     "user_action_verification_period": "User action verification period (days)",
     "user_action_verification_service_url": "User action verification service URL",
     "user_action_verification_url_param": "User action verification URL parameter name",
-    "user_action_verification_type": "User action verification type"
+    "user_action_verification_type": "User action verification type",
+    "titra_api_token": "titra API token",
+    "generate_api_token": "Generate replacement",
+    "api_token_write_only_help": "Existing tokens are hidden. Leave this blank to keep the current token, or generate a replacement and copy it before leaving this page."
   },
   "verification": {
     "overdue_title": "Action Required - Overdue",
@@ -469,7 +472,8 @@
     "user_inactive": "This user has been de-activated, please activate it to continue.",
     "extensionAlreadyLaunched": "The extension is already running.",
     "no_entry_selected": "No entry selected. Please select at least one entry to continue.",
-    "unknown_error": "An unknown error occurred."
+    "unknown_error": "An unknown error occurred.",
+    "timecard_migration_locked": "Time-entry changes are temporarily paused while an administrator migrates legacy dates. Please try again when the migration has finished."
   },
   "login": {
     "400": "Login failed, please try again.",
@@ -561,8 +565,18 @@
     "allowed_domains": "Allowed domains",
     "allowed_domains_hint": "Comma-separated list of domains allowed to send webhooks (e.g. api.stripe.com, webhook.example.com)",
     "webhook_process_data": "Webhook processing script",
-    "webhook_processdata_hint": "This JavaScript will be executed whenever a webhook is received. The script has access to 'webhookData' (the webhook payload) and 'senderDomain' variables. Return an object with 'action' ('complete' or 'revoke') and 'userId' properties to process verification, or null to ignore the webhook.",
-    "confirm_delete": "Are you sure you want to delete this item?"
+    "webhook_processdata_hint": "Legacy scripts are disabled by secure webhook interfaces.",
+    "confirm_delete": "Are you sure you want to delete this item?",
+    "webhook_security_hint": "Webhook secrets are provisioned only through the displayed environment variable. They are never entered or stored here. New and remapped interfaces remain inactive until a valid secret is present after restart.",
+    "webhook_mapping_rules": "Declarative mapping rules (JSON)",
+    "webhook_mapping_rules_hint": "Use RFC 6901 eventPointer and userIdPointer values. Each rule must select complete or revoke; executable JavaScript is not accepted.",
+    "webhook_mapping_rules_invalid": "Mapping rules must be valid JSON containing an array.",
+    "webhook_endpoint": "Endpoint ID",
+    "webhook_readiness": "Security readiness",
+    "webhook_ready": "Ready",
+    "webhook_not_ready": "Not ready",
+    "webhook_legacy": "Legacy disabled",
+    "webhook_referenced_users": "referenced user(s)"
   },
   "wekan": {
     "list": "Wekan list",

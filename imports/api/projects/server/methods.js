@@ -10,6 +10,38 @@ import { addNotification } from '../../notifications/notifications.js'
 import { emojify } from '../../../utils/frontend_helpers'
 import { periodToDates } from '../../../utils/periodHelpers.js'
 import { authenticationMixin, transactionLogMixin, calculateSimilarity } from '../../../utils/server_method_helpers'
+import {
+  definiteProjectChildNoWrite,
+  deleteEmptyProjectWithFence,
+  runWithProjectChildWriter,
+} from './projectChildFence.js'
+import { projectSnapshotSelector } from './projectLifecycle.js'
+import {
+  projectAdministratorMutationSelector,
+  projectMutationMatched,
+  projectRateModifier,
+} from './ddpMutationGuards.js'
+
+function projectMutationModifier(modifier = {}) {
+  return { ...modifier, $inc: { ...(modifier.$inc || {}), projectRevision: 1 } }
+}
+
+async function deleteEmptyProjectForLifecycle(selector, lockId = `delete:${Random.id()}`) {
+  return deleteEmptyProjectWithFence({ selector, lockId }, {
+    findOneAndUpdate: (...args) => Projects.rawCollection().findOneAndUpdate(...args),
+    countTimecards: (projectId) => Timecards.find({ projectId }).countAsync(),
+    countProjectTasks: (projectId) => Tasks.find({ projectId }).countAsync(),
+    deleteOne: (deleteSelector) => Projects.rawCollection().deleteOne(deleteSelector),
+    updateOne: (updateSelector, modifier) => Projects.rawCollection()
+      .updateOne(updateSelector, modifier),
+  })
+}
+
+const projectChildWriterDependencies = {
+  findOneAndUpdate: (...args) => Projects.rawCollection().findOneAndUpdate(...args),
+  findOne: (selector) => Projects.findOneAsync(selector),
+  updateOne: (selector, modifier) => Projects.rawCollection().updateOne(selector, modifier),
+}
 
 /**
 Get the statistics of all projects based on the timecards.
@@ -177,7 +209,8 @@ const updateProject = new ValidatedMethod({
     await Projects.updateAsync({
       $or: [{ userId: this.userId }, { admins: { $in: [this.userId] } }],
       _id: projectId,
-    }, { $set: updateJSON })
+      lifecycleLock: { $exists: false },
+    }, projectMutationModifier({ $set: updateJSON }))
   },
 })
 /**
@@ -215,6 +248,7 @@ const createProject = new ValidatedMethod({
     updateJSON.name = await emojify(updateJSON.name)
     updateJSON._id = Random.id()
     updateJSON.userId = this.userId
+    updateJSON.projectRevision = 0
     await Projects.insertAsync(updateJSON)
     return updateJSON._id
   },
@@ -236,10 +270,13 @@ const deleteProject = new ValidatedMethod({
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({ projectId }) {
-    await Projects.removeAsync({
-      $or: [{ userId: this.userId }, { admins: { $in: [this.userId] } }],
-      _id: projectId,
-    })
+    const project = await Projects.findOneAsync({ _id: projectId, userId: this.userId })
+    if (!project) throw new Meteor.Error('not-authorized')
+    const result = await deleteEmptyProjectForLifecycle(projectSnapshotSelector(project))
+    if (result.status === 'not-empty') {
+      throw new Meteor.Error('project-not-empty', 'Only empty projects can be deleted; archive it instead.')
+    }
+    if (result.status !== 'deleted') throw new Meteor.Error('project-write-conflict')
     return true
   },
 })
@@ -264,8 +301,9 @@ const archiveProject = new ValidatedMethod({
       {
         _id: projectId,
         $or: [{ userId: this.userId }, { admins: { $in: [this.userId] } }],
+        lifecycleLock: { $exists: false },
       },
-      { $set: { archived: true } },
+      projectMutationModifier({ $set: { archived: true } }),
     )
     return true
   },
@@ -291,8 +329,9 @@ const restoreProject = new ValidatedMethod({
       {
         _id: projectId,
         $or: [{ userId: this.userId }, { admins: { $in: [this.userId] } }],
+        lifecycleLock: { $exists: false },
       },
-      { $set: { archived: false } },
+      projectMutationModifier({ $set: { archived: false } }),
     )
     return true
   },
@@ -404,8 +443,13 @@ const addTeamMember = new ValidatedMethod({
     }
     const targetUser = await Meteor.users.findOneAsync({ 'emails.0.address': eMail, inactive: { $ne: true } })
     if (targetUser) {
-      await Projects
-        .updateAsync({ _id: targetProject._id }, { $addToSet: { team: targetUser._id } })
+      const result = await Projects.rawCollection().updateOne(
+        projectAdministratorMutationSelector(targetProject._id, this.userId),
+        projectMutationModifier({ $addToSet: { team: targetUser._id } }),
+      )
+      if (!projectMutationMatched(result)) {
+        throw new Meteor.Error('notifications.only_owner_can_add_team_members')
+      }
       await addNotification(`You have been invited to collaborate on the titra project '${targetProject.name}'`, targetUser._id)
       return 'notifications.team_member_added_success'
     }
@@ -434,11 +478,16 @@ const removeTeamMember = new ValidatedMethod({
     const targetProject = await Projects.findOneAsync({ _id: projectId })
     if (!targetProject
       || !(targetProject.userId === this.userId
-        || targetProject.admins.indexOf(this.userId) >= 0)) {
+        || targetProject.admins?.indexOf(this.userId) >= 0)) {
       throw new Meteor.Error('notifications.only_owner_can_remove_team_members')
     }
-    await Projects.updateAsync({ _id: targetProject._id }, { $pull: { team: userId } })
-    await Projects.updateAsync({ _id: targetProject._id }, { $pull: { admins: userId } })
+    const result = await Projects.rawCollection().updateOne(
+      projectAdministratorMutationSelector(targetProject._id, this.userId),
+      projectMutationModifier({ $pull: { team: userId, admins: userId } }),
+    )
+    if (!projectMutationMatched(result)) {
+      throw new Meteor.Error('notifications.only_owner_can_remove_team_members')
+    }
     return 'notifications.team_member_removed_success'
   },
 })
@@ -466,13 +515,18 @@ const changeProjectRole = new ValidatedMethod({
     const targetProject = await Projects.findOneAsync({ _id: projectId })
     if (!targetProject
       || !(targetProject.userId === this.userId
-        || targetProject.admins.indexOf(this.userId) >= 0)) {
+        || targetProject.admins?.indexOf(this.userId) >= 0)) {
       throw new Meteor.Error('notifications.only_owner_can_remove_team_members')
     }
-    if (administrator) {
-      await Projects.updateAsync({ _id: targetProject._id }, { $push: { admins: userId } })
-    } else {
-      await Projects.updateAsync({ _id: targetProject._id }, { $pull: { admins: userId } })
+    const modifier = administrator
+      ? { $addToSet: { admins: userId } }
+      : { $pull: { admins: userId } }
+    const result = await Projects.rawCollection().updateOne(
+      projectAdministratorMutationSelector(targetProject._id, this.userId),
+      projectMutationModifier(modifier),
+    )
+    if (!projectMutationMatched(result)) {
+      throw new Meteor.Error('notifications.only_owner_can_remove_team_members')
     }
     return 'notifications.access_rights_updated'
   },
@@ -500,8 +554,9 @@ const updatePriority = new ValidatedMethod({
       {
         _id: projectId,
         $or: [{ userId: this.userId }, { admins: { $in: [this.userId] } }],
+        lifecycleLock: { $exists: false },
       },
-      { $set: { priority } },
+      projectMutationModifier({ $set: { priority } }),
     )
     return 'notifications.project_priority_success'
   },
@@ -528,23 +583,48 @@ const setDefaultTaskForProject = new ValidatedMethod({
     const project = await Projects.findOneAsync({
       _id: projectId,
       $or: [{ userId: this.userId }, { admins: { $in: [this.userId] } }],
+      lifecycleLock: { $exists: false },
     })
     if (!project) {
       throw new Meteor.Error('notifications.project_not_found')
     }
-    const task = await Tasks.findOneAsync({ _id: taskId })
-    if (!task || task.projectId !== projectId) {
-      throw new Meteor.Error('notifications.task_not_found')
-    }
-    if (task.isDefaultTask) {
-      await Projects.updateAsync({ _id: projectId }, { $unset: { defaultTask: 1 } })
-      await Tasks.updateAsync({ _id: taskId }, { $set: { isDefaultTask: false } })
-      return 'notifications.default_task_success'
-    }
-    await Projects.updateAsync({ _id: projectId }, { $set: { defaultTask: task.name } })
-    await Tasks.updateAsync({ projectId }, { $set: { isDefaultTask: false } }, { multi: true })
-    await Tasks.updateAsync({ _id: taskId }, { $set: { isDefaultTask: true } })
-    return 'notifications.default_task_success'
+    return runWithProjectChildWriter({
+      selector: {
+        _id: projectId,
+        $or: [{ userId: this.userId }, { admins: { $in: [this.userId] } }],
+      },
+      projectId,
+      reservationId: `task-default:${taskId}:${Random.id()}`,
+      kind: 'project-default-task',
+      resourceId: taskId,
+      operation: async () => {
+        const task = await Tasks.findOneAsync({ _id: taskId, projectId })
+        if (!task) {
+          throw definiteProjectChildNoWrite(
+            new Meteor.Error('notifications.task_not_found'),
+          )
+        }
+        if (task.isDefaultTask) {
+          await Projects.updateAsync({
+            _id: projectId, lifecycleLock: { $exists: false },
+          }, projectMutationModifier({ $unset: { defaultTask: 1 } }))
+          await Tasks.updateAsync({ _id: taskId, projectId }, {
+            $set: { isDefaultTask: false }, $inc: { projectTaskRevision: 1 },
+          })
+          return 'notifications.default_task_success'
+        }
+        await Projects.updateAsync({
+          _id: projectId, lifecycleLock: { $exists: false },
+        }, projectMutationModifier({ $set: { defaultTask: task.name } }))
+        await Tasks.updateAsync({ projectId, isDefaultTask: true, _id: { $ne: taskId } }, {
+          $set: { isDefaultTask: false }, $inc: { projectTaskRevision: 1 },
+        }, { multi: true })
+        await Tasks.updateAsync({ _id: taskId, projectId }, {
+          $set: { isDefaultTask: true }, $inc: { projectTaskRevision: 1 },
+        })
+        return 'notifications.default_task_success'
+      },
+    }, projectChildWriterDependencies)
   },
 })
 
@@ -569,20 +649,18 @@ const setRateForUser = new ValidatedMethod({
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({ projectId, userId, rate }) {
-    const project = await Projects.findOneAsync({
-      _id: projectId,
-      $or: [{ userId: this.userId }, { admins: { $in: [this.userId] } }],
-    })
-    if (!project) {
+    let modifier
+    try {
+      modifier = projectRateModifier(userId, rate)
+    } catch (error) {
       throw new Meteor.Error('notifications.project_not_found')
     }
-    const rates = project.rates || {}
-    const rateId = JSON.parse(`{ "rates.${userId}": 1}`)
-    if (parseFloat(rate) > 0) {
-      rates[userId] = rate
-      await Projects.updateAsync({ _id: projectId }, { $set: { rates } })
-    } else {
-      await Projects.updateAsync({ _id: projectId }, { $unset: rateId })
+    const result = await Projects.rawCollection().updateOne(
+      projectAdministratorMutationSelector(projectId, this.userId),
+      projectMutationModifier(modifier),
+    )
+    if (!projectMutationMatched(result)) {
+      throw new Meteor.Error('notifications.project_not_found')
     }
     return 'notifications.rate_success'
   },
@@ -620,6 +698,7 @@ const searchForProject = new ValidatedMethod({
 })
 
 export {
+  deleteEmptyProjectForLifecycle,
   getAllProjectStats,
   getProjectUsers,
   createProject,

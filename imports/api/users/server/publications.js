@@ -3,6 +3,7 @@ import Timecards from '../../timecards/timecards.js'
 import Projects from '../../projects/projects.js'
 import { Dashboards } from '../../dashboards/dashboards'
 import { checkAuthentication, checkAdminAuthentication } from '../../../utils/server_method_helpers.js'
+import { API_SAFE_USER_FIELDS } from './apiUserPublication.js'
 /**
  * Publishes the users who tracked time on a project based on the provided project ID.
  * @param {String} projectId - The project ID.
@@ -110,7 +111,7 @@ Meteor.publish('dashboardUser', async function dashboardUser({ _id }) {
  */
 Meteor.publish('userRoles', async function userRoles() {
   await checkAuthentication(this)
-  return Meteor.users.find({ _id: this.userId }, { fields: { profile: 1, isAdmin: 1 } })
+  return Meteor.users.find({ _id: this.userId }, { fields: API_SAFE_USER_FIELDS })
 })
 /** 
  * Publishes user list for administrators based on the provided limit and search string.

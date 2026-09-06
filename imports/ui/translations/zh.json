@@ -280,7 +280,10 @@
     "rounding_tooltip": "Tracked time will be rounded up according to the selected time unit and the specified rounding value e.g. time unit minutes and round value 15 will round up to the next 15 minutes (input 5 minutes > result after rounding 15 minutes).",
     "enable_siwapp": "Enable Siwapp integration?",
     "custom_logo": "自定义徽标（URL 或 Data URI）",
-    "enable_googleapi": "启用 Google Workspace 集成？"
+    "enable_googleapi": "启用 Google Workspace 集成？",
+    "titra_api_token": "titra API 令牌",
+    "generate_api_token": "生成替代令牌",
+    "api_token_write_only_help": "现有令牌已隐藏。留空可保留当前令牌；如需替换，请生成新令牌并在离开此页面前复制。"
   },
   "verification": {
     "overdue_title": "需要操作 - 已逾期",
@@ -473,7 +476,8 @@
     "only_administrator_can_register_time": "Only administrators can register time for another user.",
     "user_not_found_in_project": "No user with this e-mail address could be found in this project.",
     "user_inactive": "This user has been de-activated, please activate it to continue.",
-    "extensionAlreadyLaunched": "The extension is already running."
+    "extensionAlreadyLaunched": "The extension is already running.",
+    "timecard_migration_locked": "Time-entry changes are temporarily paused while an administrator migrates legacy dates. Please try again when the migration has finished."
   },
   "login": {
     "400": "登录失败，请重试",
@@ -561,12 +565,22 @@
     "allowed_domains": "允许的域名",
     "allowed_domains_hint": "允许发送webhook的域名列表，用逗号分隔（例如：api.stripe.com, webhook.example.com）",
     "webhook_process_data": "Webhook处理脚本",
-    "webhook_processdata_hint": "每当收到webhook时都会执行此JavaScript。脚本可以访问'webhookData'（webhook载荷）和'senderDomain'变量。返回包含'action'（'complete'或'revoke'）和'userId'属性的对象来处理验证，或返回null忽略webhook。",
+    "webhook_processdata_hint": "安全 webhook 接口已禁用旧版脚本。",
     "confirm_delete": "您确定要删除此项目吗？",
     "user_inactive": "Inactive?",
     "category": "Category",
     "category_hint": "The category is used to group custom fields visually.",
-    "custom_field_name_hint": "不允许使用空格和特殊字符。"
+    "custom_field_name_hint": "不允许使用空格和特殊字符。",
+    "webhook_security_hint": "Webhook 密钥只能通过显示的环境变量提供，绝不会在此输入或存储。新的或重新映射的接口在使用有效密钥重启之前保持停用。",
+    "webhook_mapping_rules": "声明式映射规则 (JSON)",
+    "webhook_mapping_rules_hint": "使用 RFC 6901 指针选择事件和用户 ID。每条规则必须选择 complete 或 revoke；不接受 JavaScript。",
+    "webhook_mapping_rules_invalid": "映射规则必须是有效的 JSON 数组。",
+    "webhook_endpoint": "端点 ID",
+    "webhook_readiness": "安全就绪状态",
+    "webhook_ready": "已就绪",
+    "webhook_not_ready": "未就绪",
+    "webhook_legacy": "旧版已禁用",
+    "webhook_referenced_users": "个关联用户"
   },
   "wekan": {
     "list": "Wekan 列表",

@@ -6,6 +6,7 @@ import { NodeVM } from '../../../utils/vm_sandbox.js'
 import Timecards from '../timecards.js'
 import Tasks from '../../tasks/tasks.js'
 import Projects from '../../projects/projects.js'
+import { refreshPersonalTaskSuggestion } from '../../tasks/server/taskSuggestions.js'
 import { t } from '../../../utils/i18n.js'
 import { emojify } from '../../../utils/frontend_helpers'
 import { sanitizeObject } from '../../../utils/sanitizer.js'
@@ -30,12 +31,70 @@ import {
   isStartTime,
   timecardDateAggregationExpression,
 } from '../../../utils/timecardDate.js'
-import { timecardDateStateSelector } from '../../../utils/timecardRevision.js'
+import { matchesTimecardDateRevision } from '../../../utils/timecardRevision.js'
+import { editOwnedTimecardTask } from './taskEdit.js'
+import { editOwnedTimecardDetails } from './detailsEdit.js'
+import {
+  canRegisterTime,
+  runAuthorizedTimecardCreateRule,
+} from './createAuthorization.js'
+import {
+  evaluateTimeEntryRule,
+  timeEntryRuleInternalError,
+} from './timeEntryRuleOutcome.js'
+import {
+  insertDocumentWithId,
+  recoverCreatedDocument,
+} from '../../apiidempotency/server/resourceCreate.js'
+import {
+  createProjectChildWithFence,
+  runWithProjectChildWriter,
+} from '../../projects/server/projectChildFence.js'
+import {
+  assertTimecardDateMigrationUnlocked,
+  withTimecardDateWriteLease,
+} from '../../timecarddatemigrations/timecarddatemigrations.js'
+
+/* eslint-disable no-await-in-loop */
 
 const timeEntryForbiddenCustomfieldKeys = new Set([
   '_id', 'userId', 'projectId', 'date', 'dateOnly', 'startTime', 'dateRevision',
   'hours', 'task', 'taskRate', 'state', 'lastUsed', 'name', 'createdAt', 'updatedAt',
 ])
+const timecardDateFields = ['date', 'dateOnly', 'startTime', 'dateRevision']
+
+const projectChildFenceDependencies = {
+  findOneAndUpdate: (...args) => Projects.rawCollection().findOneAndUpdate(...args),
+  findOne: (selector) => Projects.findOneAsync(selector),
+  updateOne: (selector, modifier) => Projects.rawCollection().updateOne(selector, modifier),
+}
+
+function timecardProjectSelector(projectId, userId) {
+  return {
+    _id: projectId,
+    $or: [{ userId }, { admins: userId }, { team: userId }, { public: true }],
+  }
+}
+
+function refreshTaskSuggestion(userId, name) {
+  return refreshPersonalTaskSuggestion({ userId, name }, {
+    findOne: (selector) => Tasks.findOneAsync(selector),
+    insertOne: (document) => Tasks.insertAsync(document),
+    updateOne: (selector, modifier) => Tasks.updateAsync(selector, modifier),
+  })
+}
+
+function timecardDateCompareAndSwapSelector(timecard) {
+  const selector = { _id: timecard._id }
+  timecardDateFields.forEach((field) => {
+    if (Object.prototype.hasOwnProperty.call(timecard, field)) {
+      selector[field] = timecard[field]
+    } else {
+      selector[field] = { $exists: false }
+    }
+  })
+  return selector
+}
 
 function assertTimecardWriteSucceeded(result) {
   const affectedCount = result?.matchedCount != null
@@ -102,6 +161,8 @@ function assertWeekCellIsUnambiguous(matchingTimecards) {
  * @param {string} args.projectId - The ID of the project for the timecard.
  * @param {string} args.task - The task for the timecard.
  * @param {Date} args.date - The date of the timecard.
+ * @param {string} [args.dateOnly] - The calendar date in YYYY-MM-DD format.
+ * @param {string} [args.startTime] - The optional start time in HH:mm format.
  * @param {number} args.hours - The number of hours for the timecard.
  * @param {string} [args.userId] - The ID of the user for the timecard.
  * @param {Object} [args.customfields] - The custom fields for the timecard.
@@ -118,30 +179,43 @@ async function checkTimeEntryRule({
 }) {
   const dateFields = buildTimecardDateFields(date, dateOnly, startTime)
   const meteorUser = await Meteor.users.findOneAsync({ _id: userId })
-  const vm = new NodeVM({
-    wrapper: 'none',
-    timeout: 1000,
-    console: 'inherit', // Enable console logging for testing
-    sandbox: {
-      user: meteorUser.profile,
-      project: await Projects.findOneAsync({ _id: projectId }),
-      dayjs,
-      timecard: {
-        projectId,
-        task,
-        state,
-        ...dateFields,
-        hours,
-      },
-    },
-  })
+  const project = await Projects.findOneAsync({ _id: projectId })
+  const rule = await getGlobalSettingAsync('timeEntryRule')
+  if (!meteorUser || !project) throw timeEntryRuleInternalError()
+  let vm
   try {
-    if (!await vm.run(await getGlobalSettingAsync('timeEntryRule'))) {
-      throw new Meteor.Error('notifications.time_entry_rule_failed')
-    }
+    vm = new NodeVM({
+      wrapper: 'none',
+      timeout: 1000,
+      console: 'inherit', // Enable console logging for testing
+      sandbox: {
+        user: meteorUser.profile,
+        project,
+        dayjs,
+        timecard: {
+          projectId,
+          task,
+          state,
+          ...dateFields,
+          hours,
+        },
+      },
+    })
   } catch (error) {
-    throw new Meteor.Error(error.message)
+    throw timeEntryRuleInternalError()
   }
+  await evaluateTimeEntryRule(rule, (source) => vm.run(source))
+}
+
+function checkAuthorizedTimeEntryRule(ruleInput) {
+  return runAuthorizedTimecardCreateRule({
+    projectId: ruleInput.projectId,
+    userId: ruleInput.userId,
+    ruleInput,
+  }, {
+    findProject: (selector) => Projects.findOneAsync(selector),
+    checkRule: checkTimeEntryRule,
+  })
 }
 /**
  * Inserts a new timecard into the Timecards collection.
@@ -168,10 +242,50 @@ async function insertTimeCard(
   customfields,
   dateOnly,
   startTime,
+  options = {},
 ) {
-  const safeCustomfields = sanitizeObject(customfields, timeEntryForbiddenCustomfieldKeys)
-  const newTimeCard = {
-    ...safeCustomfields,
+  await assertTimecardDateMigrationUnlocked()
+  const newTimeCard = await buildAPITimeCardDocument({
+    projectId, task, date, hours, userId, taskRate, customfields, dateOnly, startTime,
+  })
+  const taskName = newTimeCard.task
+  const updateTaskSuggestion = () => refreshTaskSuggestion(userId, taskName)
+  if (!options.timecardId) await updateTaskSuggestion()
+  const targetTimecardId = options.timecardId || Random.id()
+  const result = await withTimecardDateWriteLease(() => createProjectChildWithFence({
+    selector: timecardProjectSelector(projectId, userId),
+    projectId,
+    reservationId: `timecard:${targetTimecardId}`,
+    kind: 'timecard-create',
+    resourceId: targetTimecardId,
+    createChild: async () => {
+      if (options.timecardId) {
+        return insertDocumentWithId(Timecards, newTimeCard, options.timecardId)
+      }
+      await Timecards.insertAsync({ ...newTimeCard, _id: targetTimecardId })
+      return { resourceId: targetTimecardId, created: true }
+    },
+    removeCreatedChild: (resourceId) => Timecards.rawCollection().deleteOne({
+      _id: resourceId, projectId, userId,
+    }),
+  }, projectChildFenceDependencies))
+  if (options.timecardId) {
+    // Suggestions are a derived convenience. Updating them after the atomic
+    // target insert lets a retry repair this side effect without duplicating
+    // the authoritative time entry.
+    await updateTaskSuggestion()
+    return options.returnCreationMetadata
+      ? { timecardId: result.resourceId, created: result.created }
+      : result.resourceId
+  }
+  return result.resourceId
+}
+
+async function buildAPITimeCardDocument({
+  projectId, task, date, hours, userId, taskRate, customfields, dateOnly, startTime,
+}) {
+  const document = {
+    ...sanitizeObject(customfields, timeEntryForbiddenCustomfieldKeys),
     userId,
     projectId,
     ...buildTimecardDateFields(date, dateOnly, startTime),
@@ -179,20 +293,78 @@ async function insertTimeCard(
     hours,
     task: await emojify(task),
   }
-  if (taskRate) {
-    newTimeCard.taskRate = taskRate
-  }
-  if (!await Tasks.findOneAsync({ $or: [{ userId }, { projectId }], name: await emojify(task) })) {
-    await Tasks.insertAsync({
-      ...safeCustomfields, userId, lastUsed: new Date(), name: await emojify(task),
+  if (taskRate) document.taskRate = taskRate
+  return document
+}
+
+async function recoverAPITimeCard(
+  projectId,
+  task,
+  date,
+  hours,
+  userId,
+  taskRate,
+  customfields,
+  dateOnly,
+  startTime,
+  timecardId,
+) {
+  const document = await buildAPITimeCardDocument({
+    projectId, task, date, hours, userId, taskRate, customfields, dateOnly, startTime,
+  })
+  // This is the authoritative recovery read for a previously reserved create.
+  // It intentionally has no mutable project/rule/migration/fence checks and no
+  // derived suggestion side effect: exact ID + full document equality is the
+  // only safe way to confirm a write whose acknowledgement was lost.
+  const recovered = await recoverCreatedDocument(Timecards, document, timecardId)
+  if (!recovered) return null
+  return { timecardId, created: false }
+}
+
+async function insertAPITimeCard(
+  projectId, task, date, hours, userId, taskRate, customfields, dateOnly, startTime, options = {},
+) {
+  await assertTimecardDateMigrationUnlocked()
+  try {
+    await checkAuthorizedTimeEntryRule({
+      userId, projectId, task, state: 'new', date, dateOnly, startTime, hours,
     })
-  } else {
-    await Tasks.updateAsync(
-      { $or: [{ userId }, { projectId }], name: await emojify(task) },
-      { $set: { ...safeCustomfields, lastUsed: new Date() } },
+  } catch (error) {
+    if (error?.error !== 'timecard-rule-blocked') throw error
+    throw new Meteor.Error(
+      'timecard-rule-blocked',
+      'The configured time entry rule prevented this time entry.',
     )
   }
-  return Timecards.insertAsync(newTimeCard)
+  return insertTimeCard(
+    projectId, task, date, hours, userId, taskRate, customfields, dateOnly, startTime, options,
+  )
+}
+
+async function insertIdempotentAPITimeCard(
+  projectId,
+  task,
+  date,
+  hours,
+  userId,
+  taskRate,
+  customfields,
+  dateOnly,
+  startTime,
+  timecardId,
+) {
+  return insertAPITimeCard(
+    projectId,
+    task,
+    date,
+    hours,
+    userId,
+    taskRate,
+    customfields,
+    dateOnly,
+    startTime,
+    { timecardId, returnCreationMetadata: true },
+  )
 }
 /**
  * Updates an existing timecard in the Timecards collection.
@@ -208,6 +380,7 @@ async function insertTimeCard(
  * @throws {Meteor.Error} If time entry rule fails.
  */
 async function upsertTimecard(projectId, task, date, hours, userId, dateOnly) {
+  await assertTimecardDateMigrationUnlocked()
   const { dateFields, taskName, selector } = await buildWeekTimecardContext(
     projectId,
     task,
@@ -215,83 +388,117 @@ async function upsertTimecard(projectId, task, date, hours, userId, dateOnly) {
     userId,
     dateOnly,
   )
-  const matchingTimecards = await Timecards.find(selector, {
-    sort: { _id: 1 },
-    limit: 2,
-  }).fetchAsync()
-  assertWeekCellIsUnambiguous(matchingTimecards)
-
-  if (!await Tasks.findOneAsync({ userId, name: taskName })) {
-    await Tasks.insertAsync({ userId, lastUsed: new Date(), name: taskName })
-  } else {
-    await Tasks.updateAsync(
-      { userId, name: taskName },
-      { $set: { lastUsed: new Date() } },
-    )
-  }
-  if (hours === 0) {
-    if (matchingTimecards.length === 1) {
-      const removed = await Timecards.rawCollection().deleteOne(
-        timecardDateStateSelector(matchingTimecards[0]),
+  await withTimecardDateWriteLease(async (assertWriterLease) => {
+    const matchingTimecards = await Timecards.find(selector, { sort: { _id: 1 } }).fetchAsync()
+    assertWeekCellIsUnambiguous(matchingTimecards)
+    await refreshTaskSuggestion(userId, taskName)
+    if (hours === 0) {
+      for (const matchingTimecard of matchingTimecards) {
+        await assertWriterLease()
+        const removed = await Timecards.rawCollection().deleteOne(
+          timecardDateCompareAndSwapSelector(matchingTimecard),
+        )
+        assertTimecardWriteSucceeded(removed)
+      }
+    } else if (matchingTimecards.length === 1) {
+      // A single legacy entry may encode its start time in date. Updating a week
+      // cell must not destroy that timestamp when its timezone is unknown.
+      const fieldsForUpdate = !isDateOnly(matchingTimecards[0].dateOnly)
+        ? {}
+        : dateFields
+      await assertWriterLease()
+      const updated = await Timecards.rawCollection().updateOne(
+        timecardDateCompareAndSwapSelector(matchingTimecards[0]),
+        {
+          $set: {
+            userId,
+            projectId,
+            ...fieldsForUpdate,
+            hours,
+            task: taskName,
+          },
+          $inc: { dateRevision: 1 },
+        },
       )
-      assertTimecardWriteSucceeded(removed)
+      assertTimecardWriteSucceeded(updated)
+    } else {
+      await assertWriterLease()
+      const newTimecardId = Random.id()
+      await createProjectChildWithFence({
+        selector: timecardProjectSelector(projectId, userId),
+        projectId,
+        reservationId: `timecard-week:${newTimecardId}`,
+        kind: 'timecard-week-upsert',
+        resourceId: newTimecardId,
+        createChild: async () => {
+          const updated = await Timecards.rawCollection().updateOne(
+            selector,
+            {
+              $set: {
+                userId,
+                projectId,
+                ...dateFields,
+                hours,
+                task: taskName,
+              },
+              $setOnInsert: { _id: newTimecardId },
+              $inc: { dateRevision: 1 },
+            },
+            { upsert: true },
+          )
+          assertTimecardWriteSucceeded(updated)
+          return {
+            resourceId: updated.upsertedCount === 1 ? newTimecardId : null,
+            created: updated.upsertedCount === 1,
+          }
+        },
+        removeCreatedChild: (resourceId) => Timecards.rawCollection().deleteOne({
+          _id: resourceId, projectId, userId,
+        }),
+      }, projectChildFenceDependencies)
     }
-  } else if (matchingTimecards.length === 1) {
-    // A legacy entry may encode its start time in date. A week-cell edit must
-    // not destroy that timestamp while its original timezone remains unknown.
-    const fieldsForUpdate = isDateOnly(matchingTimecards[0].dateOnly)
-      ? dateFields
-      : {}
-    const updated = await Timecards.rawCollection().updateOne(
-      timecardDateStateSelector(matchingTimecards[0]),
-      {
-        $set: {
-          userId,
-          projectId,
-          ...fieldsForUpdate,
-          hours,
-          task: taskName,
-        },
-        $inc: { dateRevision: 1 },
-      },
-    )
-    assertTimecardWriteSucceeded(updated)
-  } else {
-    const updated = await Timecards.rawCollection().updateOne(
-      selector,
-      {
-        $set: {
-          userId,
-          projectId,
-          ...dateFields,
-          hours,
-          task: taskName,
-        },
-        $inc: { dateRevision: 1 },
-      },
-      { upsert: true },
-    )
-    assertTimecardWriteSucceeded(updated)
-  }
+  })
   return 'notifications.success'
 }
+
+function isProjectAdministrator(project, userId) {
+  return project?.userId === userId || project?.admins?.includes(userId)
+}
+
+function canUserRegisterTimeForProject(project, userId) {
+  return canRegisterTime(project, userId)
+}
+
 async function checkProjectAdministratorAndUser(projectId, administratorId, userId) {
   const targetProject = await Projects.findOneAsync({ _id: projectId })
-  if (!targetProject
-      || !(targetProject.userId === administratorId
-      || targetProject.admins.indexOf(administratorId) >= 0)) {
+  if (!isProjectAdministrator(targetProject, administratorId)) {
     throw new Meteor.Error('notifications.only_administrator_can_register_time')
   }
   const user = await Meteor.users.findOneAsync({ 'profile.name': userId })
   if (!user) {
     throw new Meteor.Error('notifications.user_not_found')
   }
-  if (targetProject.public !== true
-      && targetProject.userId !== user._id
-      && targetProject.team.indexOf(user._id) === -1) {
+  if (!canUserRegisterTimeForProject(targetProject, user._id)) {
     throw new Meteor.Error('notifications.user_not_found_in_project')
   }
   return user._id
+}
+
+async function resolveBulkTimecardUserId(projectId, requestedUserId, callerUserId) {
+  const targetProject = await Projects.findOneAsync({ _id: projectId })
+  const targetUserId = requestedUserId || callerUserId
+  if (targetUserId !== callerUserId) {
+    if (!isProjectAdministrator(targetProject, callerUserId)) {
+      throw new Meteor.Error('notifications.only_administrator_can_register_time')
+    }
+    if (!await Meteor.users.findOneAsync({ _id: targetUserId })) {
+      throw new Meteor.Error('notifications.user_not_found')
+    }
+  }
+  if (!canUserRegisterTimeForProject(targetProject, targetUserId)) {
+    throw new Meteor.Error('notifications.user_not_found_in_project')
+  }
+  return targetUserId
 }
 /**
  * Inserts a new timecard into the Timecards collection.
@@ -328,7 +535,7 @@ const insertTimeCardMethod = new ValidatedMethod({
     if (user !== userId) {
       userId = await checkProjectAdministratorAndUser(projectId, userId, user)
     }
-    await checkTimeEntryRule({
+    await checkAuthorizedTimeEntryRule({
       userId, projectId, task, state: 'new', date, dateOnly, startTime, hours,
     })
     return insertTimeCard(
@@ -373,6 +580,7 @@ const upsertWeek = new ValidatedMethod({
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run(weekArray) {
+    await assertTimecardDateMigrationUnlocked()
     await Promise.all(weekArray.map(async (element) => {
       const { selector } = await buildWeekTimecardContext(
         element.projectId,
@@ -387,7 +595,7 @@ const upsertWeek = new ValidatedMethod({
       }).fetchAsync()
       assertWeekCellIsUnambiguous(matchingTimecards)
     }))
-    await Promise.all(weekArray.map((element) => checkTimeEntryRule({
+    await Promise.all(weekArray.map((element) => checkAuthorizedTimeEntryRule({
       userId: this.userId,
       projectId: element.projectId,
       task: element.task,
@@ -397,8 +605,6 @@ const upsertWeek = new ValidatedMethod({
       hours: element.hours,
     })))
     for (const element of weekArray) {
-      // Keep duplicate cells in one request ordered so the revision check cannot race itself.
-      // eslint-disable-next-line no-await-in-loop
       await upsertTimecard(
         element.projectId,
         element.task,
@@ -443,27 +649,58 @@ const updateTimeCard = new ValidatedMethod({
   async run({
     projectId, _id, task, date, dateOnly, startTime, hours, taskRate, customfields, user,
   }) {
-    let { userId } = this
-    if (user !== userId) {
-      userId = await checkProjectAdministratorAndUser(projectId, userId, user)
+    await assertTimecardDateMigrationUnlocked()
+    const callerUserId = this.userId
+    let targetUserId = callerUserId
+    if (user !== callerUserId) {
+      targetUserId = await checkProjectAdministratorAndUser(
+        projectId,
+        callerUserId,
+        user,
+      )
     }
-    const timecard = await Timecards.findOneAsync({ _id })
+    const timecard = await Timecards.findOneAsync({ _id, userId: targetUserId })
+    if (!timecard) {
+      throw new Meteor.Error('not-authorized')
+    }
+    if (targetUserId !== callerUserId && timecard.projectId !== projectId) {
+      const sourceProject = await Projects.findOneAsync({
+        _id: timecard.projectId,
+        $or: [
+          { userId: callerUserId },
+          { admins: { $in: [callerUserId] } },
+        ],
+      })
+      if (!sourceProject) {
+        throw new Meteor.Error('notifications.only_administrator_can_register_time')
+      }
+    }
     if (isDateOnly(timecard?.dateOnly) && !isDateOnly(dateOnly)) {
       assertModernTimecardDatePayload(dateOnly)
     }
-    await checkTimeEntryRule({
-      userId, projectId, task, state: timecard.state, date, dateOnly, startTime, hours,
+    await checkAuthorizedTimeEntryRule({
+      userId: targetUserId,
+      projectId,
+      task,
+      state: timecard.state,
+      date,
+      dateOnly,
+      startTime,
+      hours,
     })
     const safeCustomfields = sanitizeObject(customfields, timeEntryForbiddenCustomfieldKeys)
-    if (!await Tasks.findOneAsync({ userId, name: await emojify(task) })) {
-      await Tasks.insertAsync({ ...safeCustomfields, userId, name: await emojify(task) })
-    }
+    await refreshTaskSuggestion(targetUserId, await emojify(task))
     const fieldsToSet = {
       ...safeCustomfields,
       projectId,
       ...buildTimecardDateFields(date, dateOnly, startTime),
       hours,
       task: await emojify(task),
+    }
+    const updateSelector = {
+      ...timecardDateCompareAndSwapSelector(timecard),
+      userId: targetUserId,
+      projectId: timecard.projectId,
     }
     const modifier = {
       $set: fieldsToSet,
@@ -474,9 +711,16 @@ const updateTimeCard = new ValidatedMethod({
     } else {
       modifier.$unset = { taskRate: '' }
     }
-    const result = await Timecards.rawCollection().updateOne(
-      timecardDateStateSelector(timecard),
-      modifier,
+    await assertTimecardDateMigrationUnlocked()
+    const result = await withTimecardDateWriteLease(
+      () => runWithProjectChildWriter({
+        selector: timecardProjectSelector(projectId, targetUserId),
+        projectId,
+        reservationId: `timecard-update:${_id}:${Random.id()}`,
+        kind: 'timecard-update',
+        resourceId: _id,
+        operation: () => Timecards.rawCollection().updateOne(updateSelector, modifier),
+      }, projectChildFenceDependencies),
     )
     assertTimecardWriteSucceeded(result)
   },
@@ -500,9 +744,26 @@ const deleteTimeCard = new ValidatedMethod({
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({ timecardId }) {
-    const timecard = await Timecards.findOneAsync({ _id: timecardId })
+    return deleteOwnedTimeCard(timecardId, this.userId)
+  },
+})
+
+async function deleteOwnedTimeCard(timecardId, userId, expectedDateRevision) {
+  await assertTimecardDateMigrationUnlocked()
+  const timecard = await Timecards.findOneAsync({ _id: timecardId, userId })
+  if (!timecard) {
+    throw new Meteor.Error('not-authorized')
+  }
+  if (expectedDateRevision !== undefined
+    && !matchesTimecardDateRevision(timecard, expectedDateRevision)) {
+    throw new Meteor.Error(
+      'timecard-write-conflict',
+      'The time entry changed after it was previewed. Reload and confirm it again.',
+    )
+  }
+  try {
     await checkTimeEntryRule({
-      userId: this.userId,
+      userId,
       projectId: timecard.projectId,
       task: timecard.task,
       state: timecard.state,
@@ -511,14 +772,70 @@ const deleteTimeCard = new ValidatedMethod({
       startTime: timecard.startTime,
       hours: timecard.hours,
     })
-    const result = await Timecards.rawCollection().deleteOne({
-      ...timecardDateStateSelector(timecard),
-      userId: this.userId,
-    })
-    assertTimecardWriteSucceeded(result)
-    return result.deletedCount
-  },
-})
+  } catch (error) {
+    if (error?.error !== 'timecard-rule-blocked') throw error
+    throw new Meteor.Error(
+      'timecard-rule-blocked',
+      'The configured time entry rule prevented this deletion.',
+    )
+  }
+  await assertTimecardDateMigrationUnlocked()
+  const result = await withTimecardDateWriteLease(
+    () => Timecards.rawCollection().deleteOne({
+      ...timecardDateCompareAndSwapSelector(timecard),
+      userId,
+    }),
+  )
+  assertTimecardWriteSucceeded(result)
+  return result.deletedCount
+}
+
+async function updateOwnedTimeCardTask(
+  timecardId, userId, task, expectedTask, expectedDateRevision,
+) {
+  return editOwnedTimecardTask({
+    timecardId, userId, task, expectedTask, expectedDateRevision,
+  }, {
+    findTimecard: (selector) => Timecards.findOneAsync(selector),
+    canAccessProject: async (projectId, callerUserId) => canUserRegisterTimeForProject(
+      await Projects.findOneAsync({ _id: projectId }), callerUserId,
+    ),
+    checkRule: checkTimeEntryRule,
+    assertUnlocked: assertTimecardDateMigrationUnlocked,
+    withWriteLease: withTimecardDateWriteLease,
+    withProjectWriter: ({ projectId, userId }, write) => runWithProjectChildWriter({
+      selector: timecardProjectSelector(projectId, userId),
+      projectId,
+      reservationId: `timecard-task:${timecardId}:${Random.id()}`,
+      kind: 'timecard-task-edit',
+      resourceId: timecardId,
+      operation: write,
+    }, projectChildFenceDependencies),
+    updateOne: (selector, modifier) => Timecards.rawCollection().updateOne(selector, modifier),
+  })
+}
+
+async function updateOwnedTimeCardDetails(options) {
+  return editOwnedTimecardDetails(options, {
+    findTimecard: (selector) => Timecards.findOneAsync(selector),
+    canAccessProject: async (projectId, callerUserId) => canUserRegisterTimeForProject(
+      await Projects.findOneAsync({ _id: projectId, lifecycleLock: { $exists: false } }),
+      callerUserId,
+    ),
+    checkRule: checkTimeEntryRule,
+    assertUnlocked: assertTimecardDateMigrationUnlocked,
+    withWriteLease: withTimecardDateWriteLease,
+    moveToProjectWithFence: ({ projectId, userId, write }) => runWithProjectChildWriter({
+      selector: timecardProjectSelector(projectId, userId),
+      projectId,
+      reservationId: `timecard-move:${options.timecardId}:${Random.id()}`,
+      kind: 'timecard-details-move',
+      resourceId: options.timecardId,
+      operation: write,
+    }, projectChildFenceDependencies),
+    updateOne: (selector, modifier) => Timecards.rawCollection().updateOne(selector, modifier),
+  })
+}
 /**
  * Creates an invoice in Siwapp through the API and
  * updates the state of a timecard in the Timecards collection.
@@ -724,7 +1041,14 @@ const getTotalHoursForPeriod = new ValidatedMethod({
     )
     const totalHoursObject = {}
     const totalEntriesTimecardsRaw = await Timecards.rawCollection()
-      .aggregate(await buildTotalHoursForPeriodSelectorAsync(projectId, period, dates, userId, customer, 0))
+      .aggregate(await buildTotalHoursForPeriodSelectorAsync(
+        projectId,
+        period,
+        dates,
+        userId,
+        customer,
+        0,
+      ))
       .toArray()
     const totalEntries = totalEntriesTimecardsRaw.length
     const totalHours = await Timecards.rawCollection().aggregate(aggregationSelector)
@@ -859,20 +1183,31 @@ const deleteTimeCardsForWeek = new ValidatedMethod({
   async run({
     projectId, task, startDateOnly, endDateOnly,
   }) {
+    await assertTimecardDateMigrationUnlocked()
     const { startDate, endDate } = dateOnlyRange(startDateOnly, endDateOnly)
-    const matchingTimecards = await Timecards.find({
+    const selector = {
+      userId: this.userId,
       projectId,
       task,
       date: { $gte: startDate, $lte: endDate },
-    }, { sort: { _id: 1 } }).fetchAsync()
-    for (const timecard of matchingTimecards) {
-      // Delete the captured revisions in order so a concurrent edit reliably aborts the batch.
-      // eslint-disable-next-line no-await-in-loop
-      const result = await Timecards.rawCollection().deleteOne(
-        timecardDateStateSelector(timecard),
-      )
-      assertTimecardWriteSucceeded(result)
     }
+    await withTimecardDateWriteLease(async (assertWriterLease) => {
+      const matchingTimecards = await Timecards.find(selector, {
+        fields: {
+          date: 1, dateOnly: 1, startTime: 1, dateRevision: 1,
+        },
+      }).fetchAsync()
+      for (const timecard of matchingTimecards) {
+        await assertWriterLease()
+        const result = await Timecards.rawCollection().deleteOne(
+          {
+            ...timecardDateCompareAndSwapSelector(timecard),
+            userId: this.userId,
+          },
+        )
+        assertTimecardWriteSucceeded(result)
+      }
+    })
   },
 })
 
@@ -997,12 +1332,12 @@ const getGoogleWorkspaceData = new ValidatedMethod({
           return updatedMessage
         }))
       } else {
-        returnEvents.map((event) => {
-          event.date = dayjs(event.startTime).format('YYYY-MM-DD')
-          event.duration = (Date.parse(event.endTime) - Date.parse(event.startTime))
-            / 1000 / 60 / 60
-          return event
-        })
+        returnEvents = returnEvents.map((event) => ({
+          ...event,
+          date: dayjs(event.startTime).format('YYYY-MM-DD'),
+          duration: (Date.parse(event.endTime) - Date.parse(event.startTime))
+            / 1000 / 60 / 60,
+        }))
       }
       let returnMessages = fetchedMessages
       if (await getGlobalSettingAsync('openai_apikey')) {
@@ -1085,7 +1420,7 @@ const userTimeCardsForPeriodByProjectByTaskMethod = new ValidatedMethod({
  * @param {Object} args - The arguments for the method.
  * @param {Date} args.startDate - The start date of the week.
  * @param {Date} args.endDate - The end date of the week.
- * @returns {Promise<Array>} - A promise that resolves to an array of objects containing the date and the total hours worked for each day.
+ * @returns {Promise<Array>} A promise resolving to daily dates and total hours.
  */
 const getTotalForWeekPerDay = new ValidatedMethod({
   name: 'getTotalForWeekPerDay',
@@ -1181,17 +1516,18 @@ const bulkInsertTimecards = new ValidatedMethod({
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({ timecards }) {
+    const preparedTimecards = []
     const insertedTimecards = []
     for (const timecard of timecards) {
-      const userId = timecard.userId || this.userId
-      // Use provided userId or fallback to the current user
       const {
         projectId, task, date, dateOnly, startTime, hours, customfields,
       } = timecard
-      // Check time entry rules
-      // Preserve the existing all-or-error order for CSV bulk imports.
-      // eslint-disable-next-line no-await-in-loop
-      await checkTimeEntryRule({
+      const userId = await resolveBulkTimecardUserId(
+        projectId,
+        timecard.userId,
+        this.userId,
+      )
+      await checkAuthorizedTimeEntryRule({
         userId,
         projectId,
         task,
@@ -1201,8 +1537,14 @@ const bulkInsertTimecards = new ValidatedMethod({
         startTime,
         hours,
       })
-      // Insert the timecard
-      // eslint-disable-next-line no-await-in-loop
+      preparedTimecards.push({
+        projectId, task, date, dateOnly, startTime, hours, customfields, userId,
+      })
+    }
+    for (const timecard of preparedTimecards) {
+      const {
+        projectId, task, date, dateOnly, startTime, hours, customfields, userId,
+      } = timecard
       const timecardId = await insertTimeCard(
         projectId,
         task,
@@ -1223,6 +1565,13 @@ const bulkInsertTimecards = new ValidatedMethod({
   },
 })
 export {
+  checkTimeEntryRule,
+  deleteOwnedTimeCard,
+  updateOwnedTimeCardTask,
+  updateOwnedTimeCardDetails,
+  insertAPITimeCard,
+  insertIdempotentAPITimeCard,
+  recoverAPITimeCard,
   insertTimeCard,
   insertTimeCardMethod,
   upsertTimecard,
