@@ -37,7 +37,18 @@
                                     <td><input type="checkbox" class="js-magic-select form-check-input"/></td>
                                     <td class="text-center"><i class="js-origin-icon text-primary fa-solid {{entry.icon}}" data-bs-toggle="popover" data-bs-trigger="hover focus" data-bs-content="{{entry.origin}}" style="cursor:pointer"></i></td>
                                     <td><input type="date" class="form-control js-magic-date" value="{{entry.date}}" required/></td>
-                                    <td>{{{ renderProjectSelect (entry.projectID) }}}</td>
+                                    <td>
+                                      <select class="form-control js-magic-project" required>
+                                        <option value="">{{t 'project.project_placeholder'}}</option>
+                                        {{#each project in projectOptions entry.projectID}}
+                                          {{#if project.selected}}
+                                            <option value="{{project._id}}" selected>{{project.name}}</option>
+                                          {{else}}
+                                            <option value="{{project._id}}">{{project.name}}</option>
+                                          {{/if}}
+                                        {{/each}}
+                                      </select>
+                                    </td>
                                     <td><input type="text" class="form-control js-magic-task" value="{{entry.summary}}" required/></td>
                                     <td><input type="number" class="form-control js-magic-hours" value="{{timeInUserUnit entry.duration}}" required/></td>
                                 </tr>

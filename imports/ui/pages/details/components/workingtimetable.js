@@ -14,6 +14,8 @@ import {
 import './workingtimetable.html'
 import './pagination.js'
 import './limitpicker.js'
+import { encodeCsv } from '../../../../utils/csvExport.js'
+import { secureDataTableColumns } from '../../../../utils/dataTableSecurity.js'
 
 Template.workingtimetable.onCreated(function workingtimetableCreated() {
   dayjs.extend(utc)
@@ -75,13 +77,14 @@ Template.workingtimetable.onRendered(() => {
         { name: t('details.totalTime'), editable: false, format: numberWithUserPrecision },
         { name: t('details.regularWorkingTime'), editable: false, format: numberWithUserPrecision },
         { name: t('details.regularWorkingTimeDifference'), editable: false, format: numberWithUserPrecision }]
+      const securedColumns = secureDataTableColumns(columns)
       if (!templateInstance.datatable) {
         import('frappe-datatable/dist/frappe-datatable.css').then(() => {
           import('frappe-datatable').then((datatable) => {
             const DataTable = datatable.default
             try {
               templateInstance.datatable = new DataTable('#datatable-container', {
-                columns,
+                columns: securedColumns,
                 serialNoColumn: false,
                 clusterize: false,
                 layout: 'ratio',
@@ -98,7 +101,7 @@ Template.workingtimetable.onRendered(() => {
       if (templateInstance.datatable && templateInstance.workingTimeEntries.get()
         && window.BootstrapLoaded.get()) {
         try {
-          templateInstance.datatable.refresh(data, columns)
+          templateInstance.datatable.refresh(data, securedColumns)
         } catch (error) {
           console.error(`Caught error: ${error}`)
         }
@@ -137,11 +140,21 @@ Template.workingtimetable.helpers({
 Template.workingtimetable.events({
   'click .js-export-csv': (event, templateInstance) => {
     event.preventDefault()
-    const csvArray = [`\uFEFF${t('globals.date')},${t('globals.resource')},${t('details.startTime')},${t('details.breakStartTime')},${t('details.breakEndTime')},${t('details.endTime')},${t('details.totalTime')},${t('details.regularWorkingTime')},${t('details.regularWorkingTimeDifference')}\r\n`]
+    const csvRows = [[
+      t('globals.date'), t('globals.resource'), t('details.startTime'),
+      t('details.breakStartTime'), t('details.breakEndTime'), t('details.endTime'),
+      t('details.totalTime'), t('details.regularWorkingTime'),
+      t('details.regularWorkingTimeDifference'),
+    ]]
     for (const timeEntry of templateInstance.workingTimeEntries.get()) {
-      csvArray.push(`${dayjs.utc(timeEntry.date).format(getGlobalSetting('dateformat'))},${timeEntry.resource},${timeEntry.startTime},${timeEntry.breakStartTime},${timeEntry.breakEndTime},${timeEntry.endTime},${timeEntry.totalTime},${timeEntry.regularWorkingTime},${timeEntry.regularWorkingTimeDifference}\r\n`)
+      csvRows.push([
+        dayjs.utc(timeEntry.date).format(getGlobalSetting('dateformat')),
+        timeEntry.resource, timeEntry.startTime, timeEntry.breakStartTime,
+        timeEntry.breakEndTime, timeEntry.endTime, timeEntry.totalTime,
+        timeEntry.regularWorkingTime, timeEntry.regularWorkingTimeDifference,
+      ])
     }
-    saveAs(new Blob(csvArray, { type: 'text/csv;charset=utf-8;header=present' }), `titra_working_time_${templateInstance.data.period.get()}.csv`)
+    saveAs(new Blob([encodeCsv(csvRows)], { type: 'text/csv;charset=utf-8;header=present' }), `titra_working_time_${templateInstance.data.period.get()}.csv`)
   },
   'click .js-export-xlsx': (event, templateInstance) => {
     event.preventDefault()

@@ -1,13 +1,20 @@
 import { Globalsettings } from '../globalsettings.js'
+import {
+  GLOBAL_SETTING_SOURCE_FIELDS,
+  globalSettingDocuments,
+} from '../globalSettingSecurity.js'
+import { publishReactiveCollection } from '../../../utils/adminCollectionPublication.js'
 
 /**
  * Publishes the global settings.
  * @returns {Mongo.Cursor} The global settings.
  */
 Meteor.publish('globalsettings', async function publishGlobalsettings() {
-  const user = await Meteor.users.findOneAsync(this.userId)
-  if (user && user.isAdmin) {
-    return Globalsettings.find()
-  }
-  return Globalsettings.find({ restricted: { $ne: true } })
+  return publishReactiveCollection(this, {
+    users: Meteor.users,
+    collection: Globalsettings,
+    collectionName: 'globalsettings',
+    fields: GLOBAL_SETTING_SOURCE_FIELDS,
+    documentsForUser: globalSettingDocuments,
+  })
 })

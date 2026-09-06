@@ -1,14 +1,38 @@
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra'
-import { DDP } from 'meteor/ddp-client'
-import { Mongo } from 'meteor/mongo'
 import './tasksearch.html'
 import './taskSelectPopup.js'
 import { t } from '../../../../utils/i18n.js'
 import Tasks from '../../../../api/tasks/tasks.js'
 import Timecards from '../../../../api/timecards/timecards.js'
-import Projects from '../../../../api/projects/projects.js'
-import { getGlobalSetting, getUserSetting, showToast } from '../../../../utils/frontend_helpers'
+import { getGlobalSetting, showToast } from '../../../../utils/frontend_helpers'
 import Autocomplete from '../../../../utils/autocomplete'
+
+function selectedProjectId(templateInstance) {
+  const projectId = templateInstance.data?.projectId
+  if (projectId && typeof projectId.get === 'function') return projectId.get()
+  if (typeof projectId === 'string') return projectId
+  return FlowRouter.getParam('projectId')
+}
+
+function loadIntegrationSuggestions(templateInstance, provider, destination, notification) {
+  const projectId = selectedProjectId(templateInstance)
+  if (!projectId) return
+  const requestKey = `${provider}:${projectId}`
+  if (templateInstance.integrationSuggestionRequests.has(requestKey)) return
+  templateInstance.integrationSuggestionRequests.add(requestKey)
+  Meteor.call(
+    'taskIntegrations.listSuggestions',
+    { provider, projectId },
+    (error, suggestions) => {
+      if (error) {
+        destination.set(false)
+        showToast(t(notification))
+        return
+      }
+      destination.set(suggestions)
+    },
+  )
+}
 
 Template.tasksearch.events({
   'click .js-show-task-select-popup': (event) => {
@@ -37,7 +61,8 @@ Template.tasksearch.onCreated(function tasksearchcreated() {
   this.wekanAPITasks = new ReactiveVar()
   this.zammadAPITasks = new ReactiveVar()
   this.gitlabAPITasks = new ReactiveVar()
-  this.project = new ReactiveVar()
+  this.integrationSuggestionRequests = new Set()
+  this.wekanUnsupportedShown = false
   this.inboundInterfaceTasks = new ReactiveVar([])
   Meteor.call('inboundinterfaces.get', (inboundinterfaceserror, inboundInterfaces) => {
     if (inboundinterfaceserror) {
@@ -69,79 +94,40 @@ Template.tasksearch.onCreated(function tasksearchcreated() {
     }
   })
   this.autorun(() => {
-    if (FlowRouter.getParam('projectId')) {
-      const project = Projects.findOne({ _id: FlowRouter.getParam('projectId') })
-      if (project) {
-        this.project.set(project)
-        if (project.wekanurl) {
-          if (Meteor.settings.public.sandstorm) {
-            const ddpcon = DDP.connect(project.wekanurl.replace('#', '/.sandstorm-token/'))
-            this.wekanTasks = new Mongo.Collection('cards', { connection: ddpcon })
-            ddpcon.subscribe('board', 'sandstorm')
-          } else if (project.selectedWekanSwimlanes?.length > 0) {
-            const authToken = project?.wekanurl?.match(/authToken=(.*)/)[1]
-            const url = project.wekanurl.substring(0, project.wekanurl.indexOf('export?'))
-            const wekanAPITasks = []
-            for (const swimlane of project.selectedWekanSwimlanes) {
-              window.fetch(`${url}swimlanes/${swimlane}/cards`, { headers: { Authorization: `Bearer ${authToken}` } }).then((response) => response.json()).then((innerResult) => {
-                Array.prototype.push.apply(wekanAPITasks, innerResult)
-                this.wekanAPITasks.set(wekanAPITasks)
-              }).catch((error) => {
-                showToast(t('notifications.wekan_error'))
-              })
-            }
-          } else if (project.selectedWekanList?.length > 0) {
-            let wekanLists = []
-            if (typeof project.selectedWekanList === 'string') {
-              wekanLists.push(project.selectedWekanList)
-            } else if (project.selectedWekanList instanceof Array) {
-              wekanLists = project.selectedWekanList
-            }
-            const authToken = project?.wekanurl?.match(/authToken=(.*)/)[1]
-            const url = project.wekanurl.substring(0, project.wekanurl.indexOf('export?'))
-            const wekanAPITasks = []
-            for (const wekanList of wekanLists) {
-              window.fetch(`${url}lists/${wekanList}/cards`, { headers: { Authorization: `Bearer ${authToken}` } }).then((response) => response.json()).then((innerResult) => {
-                Array.prototype.push.apply(wekanAPITasks, innerResult)
-                this.wekanAPITasks.set(wekanAPITasks)
-              }).catch((error) => {
-                showToast(t('notifications.wekan_error'))
-              })
-            }
-          }
-        }
+    if (!getGlobalSetting('enableWekan')) return
+    if (Meteor.settings?.public?.sandstorm) {
+      this.wekanAPITasks.set(false)
+      if (!this.wekanUnsupportedShown) {
+        this.wekanUnsupportedShown = true
+        showToast(t('notifications.wekan_sandstorm_unsupported'))
       }
+      return
+    }
+    loadIntegrationSuggestions(
+      this,
+      'wekan',
+      this.wekanAPITasks,
+      'notifications.wekan_error',
+    )
+  })
+  this.autorun(() => {
+    if (getGlobalSetting('enableZammad')) {
+      loadIntegrationSuggestions(
+        this,
+        'zammad',
+        this.zammadAPITasks,
+        'notifications.zammad_error',
+      )
     }
   })
   this.autorun(() => {
-    if (!this.zammadAPITasks.get() && getGlobalSetting('enableZammad') && getUserSetting('zammadurl') && getUserSetting('zammadtoken')) {
-      window.fetch(`${getUserSetting('zammadurl')}api/v1/tickets`, { headers: { Authorization: `Token token=${getUserSetting('zammadtoken')}` } }).then((response) => response.json()).then((result) => {
-        this.zammadAPITasks.set(result)
-      }).catch((error) => {
-        showToast(t('notifications.zammad_error'))
-      })
-    }
-  })
-  this.autorun(() => {
-    if (!this.gitlabAPITasks.get() && getGlobalSetting('enableGitlab') && getUserSetting('gitlaburl') && getUserSetting('gitlabtoken')) {
-      const query = this.project.get()?.gitlabquery ? this.project.get()?.gitlabquery : 'issues'
-      const headers = new Headers({
-        'PRIVATE-TOKEN': getUserSetting('gitlabtoken'),
-        'Access-Control-Allow-Credentials': 'true',
-        'Access-Control-Allow-Methods': 'GET,HEAD,OPTIONS,POST,PUT',
-        'Access-Control-Allow-Headers': 'Access-Control-Allow-Headers, Origin,Accept, X-Requested-With, Content-Type, Access-Control-Request-Method, Access-Control-Request-Headers, Authorization',
-
-      })
-      window.fetch(
-        `${getUserSetting('gitlaburl')}api/v4/${query}`,
-        {
-          headers,
-        },
-      ).then((response) => response.json()).then((result) => {
-        this.gitlabAPITasks.set(result)
-      }).catch((error) => {
-        showToast(t('notifications.gitlab_error'))
-      })
+    if (getGlobalSetting('enableGitlab')) {
+      loadIntegrationSuggestions(
+        this,
+        'gitlab',
+        this.gitlabAPITasks,
+        'notifications.gitlab_error',
+      )
     }
   })
   this.autorun(() => {
@@ -169,16 +155,10 @@ Template.tasksearch.onCreated(function tasksearchcreated() {
         const gitlabAPITasks = Template.instance().gitlabAPITasks.get()
         const inboundInterfaceTasks = Template.instance().inboundInterfaceTasks.get()
         const regex = `.*${Template.instance().filter.get().replace(/[-[\]{}()*+?.,\\/^$|#\s]/g, '\\$&')}.*`
-        if (Template.instance().wekanTasks) {
-          const wekanResult = Template.instance().wekanTasks.find({ title: { $regex: regex, $options: 'i' }, archived: false }, { sort: { lastUsed: -1 }, limit: getGlobalSetting('taskSearchNumResults') })
-          if (wekanResult.count() > 0) {
-            finalArray.push(...wekanResult
-              .map((elem) => ({ label: elem.title, value: elem.title, wekan: true })))
-          }
-        } else if (wekanAPITasks) {
-          if (wekanAPITasks.length > 0) {
-            finalArray.push(...Template.instance().wekanAPITasks.get().map((elem) => ({ label: elem.title, value: elem.title, wekan: true })).filter((element) => new RegExp(regex, 'i').exec(element.label)))
-          }
+        if (wekanAPITasks?.length > 0) {
+          finalArray.push(...wekanAPITasks
+            .map((elem) => ({ label: elem.title, value: elem.title, wekan: true }))
+            .filter((element) => new RegExp(regex, 'i').exec(element.label)))
         }
         if (zammadAPITasks && zammadAPITasks.length > 0) {
           finalArray.push(...zammadAPITasks.map((elem) => ({ label: elem.title, value: elem.title, zammad: true })).filter((element) => new RegExp(regex, 'i').exec(element.label)))
@@ -199,7 +179,7 @@ Template.tasksearch.onCreated(function tasksearchcreated() {
           data,
           maximumItems: getGlobalSetting('taskSearchNumResults'),
           threshold: 0,
-          onSelectItem: ({ label, value }) => {
+          onSelectItem: () => {
             this.$('.js-tasksearch-input').removeClass('is-invalid')
             $('#hours').first().trigger('focus')
           },

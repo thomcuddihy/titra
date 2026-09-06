@@ -1,25 +1,13 @@
-import namedavatar from 'namedavatar'
 import { t } from '../../utils/i18n.js'
 import '../shared components/backbutton.js'
 import './profile.html'
 import { getUserSetting, showToast } from '../../utils/frontend_helpers.js'
+import { avatarPresentation } from '../../utils/userContentSecurity.js'
 
 Template.profile.helpers({
   name: () => getUserSetting('name'),
-  svgAvatar() {
-    namedavatar.config({
-      nameType: 'initials',
-      backgroundColors:
-            [(Meteor.user() && getUserSetting('avatarColor')
-              ? getUserSetting('avatarColor') : Template.instance().selectedAvatarColor.get())],
-      minFontSize: 2,
-    })
-    const rawSVG = namedavatar.getSVG(Meteor.user() ? getUserSetting('name') : false)
-    rawSVG.classList = 'rounded'
-    rawSVG.style.width = '100px'
-    rawSVG.style.height = '100px'
-    return rawSVG.outerHTML
-  },
+  profileAvatar: () => avatarPresentation(Meteor.user()),
+  hasCustomAvatar: () => Boolean(avatarPresentation(Meteor.user()).url),
   avatarColor: () => (Meteor.user() && getUserSetting('avatarColor')
     ? getUserSetting('avatarColor') : Template.instance().selectedAvatarColor.get()),
 })
@@ -48,7 +36,7 @@ Template.profile.events({
   //   Meteor.logout()
   // },
 
-  'click svg.rounded': (event, templateInstance) => {
+  'click .js-avatar-picker': (event, templateInstance) => {
     event.preventDefault()
     templateInstance.$('#avatarImage').click()
   },
@@ -100,7 +88,7 @@ Template.profile.onRendered(function settingsRendered() {
   templateInstance.autorun(() => {
     if (!Meteor.loggingIn() && Meteor.user()
         && Meteor.user().profile && this.subscriptionsReady()) {
-      templateInstance.$('#avatarData').val(getUserSetting('avatar'))
+      templateInstance.$('#avatarData').val(avatarPresentation(Meteor.user()).url)
     }
   })
 })

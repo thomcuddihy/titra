@@ -4,6 +4,10 @@ import { t, i18nReady } from '../../../../../utils/i18n.js'
 import {
   validateEmail, getGlobalSetting, showToast, addToolTipToTableCell,
 } from '../../../../../utils/frontend_helpers'
+import {
+  escapeDataTableText,
+  secureDataTableColumns,
+} from '../../../../../utils/dataTableSecurity.js'
 import Projects from '../../../../../api/projects/projects.js'
 
 Template.projectAccessRights.onCreated(function projectAccessRightsCreated() {
@@ -32,6 +36,7 @@ Template.projectAccessRights.onRendered(() => {
         },
         {
           name: t('project.rate'),
+          id: 'rate',
           editable: true,
           focusable: true,
         },
@@ -41,11 +46,12 @@ Template.projectAccessRights.onRendered(() => {
           focusable: false,
           format: (value) => {
             if (value !== templateInstance.project?.get()?.userId) {
+              const safeId = escapeDataTableText(value)
               return templateInstance.project?.get()?.admins?.indexOf(value) >= 0
-                ? `<select class="form-select js-rw-rights" style="margin-top:-8.5px;" data-id="${value}"><option value="team">Team member</option><option value="admin" selected>Administrator</option></select>`
-                : `<select class="form-select js-rw-rights" style="margin-top:-8.5px;" data-id="${value}"><option value="team" selected>Team member</option><option value="admin">Administrator</option></select>`
+                ? `<select class="form-select js-rw-rights" style="margin-top:-8.5px;" data-id="${safeId}"><option value="team">Team member</option><option value="admin" selected>Administrator</option></select>`
+                : `<select class="form-select js-rw-rights" style="margin-top:-8.5px;" data-id="${safeId}"><option value="team" selected>Team member</option><option value="admin">Administrator</option></select>`
             }
-            return t('project.owner')
+            return escapeDataTableText(t('project.owner'))
           },
         },
         {
@@ -53,7 +59,7 @@ Template.projectAccessRights.onRendered(() => {
           editable: false,
           focusable: false,
           format: (value) => (value !== templateInstance.project?.get()?.userId
-            ? `<a href="#removeMember" class="js-remove-team-member" data-id="${value}"><i class="fa fa-trash"></i></a>` : ''),
+            ? `<a href="#removeMember" class="js-remove-team-member" data-id="${escapeDataTableText(value)}"><i class="fa fa-trash"></i></a>` : ''),
         }]
       const data = []
       data.push([
@@ -61,8 +67,9 @@ Template.projectAccessRights.onRendered(() => {
         templateInstance.project?.get()?.rates ? templateInstance.project?.get()?.rates[templateInstance.project?.get()?.userId] : '',
         templateInstance.project?.get()?.userId,
         templateInstance.project?.get()?.userId])
-      if (templateInstance.project.get()?.team) {
-        for (const member of templateInstance.project?.get()?.team) {
+      const projectTeam = templateInstance.project.get()?.team
+      if (projectTeam) {
+        for (const member of projectTeam) {
           const user = Meteor.users.findOne({ _id: member })
           if (user !== undefined) {
             data.push([user?.profile?.name,
@@ -72,12 +79,13 @@ Template.projectAccessRights.onRendered(() => {
           }
         }
       }
+      const securedColumns = secureDataTableColumns(columns)
       if (!templateInstance.projectAccessRightsDataTable) {
         import('frappe-datatable/dist/frappe-datatable.css').then(() => {
           import('frappe-datatable').then((datatable) => {
             const DataTable = datatable.default
             const datatableConfig = {
-              columns,
+              columns: securedColumns,
               data,
               serialNoColumn: false,
               clusterize: false,
@@ -85,11 +93,11 @@ Template.projectAccessRights.onRendered(() => {
               noDataMessage: t('tabular.sZeroRecords'),
               events: {
                 onRemoveColumn() {
-                  templateInstance.projectAccessRightsDataTable.refresh(data, columns)
+                  templateInstance.projectAccessRightsDataTable.refresh(data, securedColumns)
                 },
               },
               getEditor(colIndex, rowIndex, value, parent, column, row, data) {
-                if (column.name === t('project.rate')) {
+                if (column.id === 'rate') {
                   const $input = document.createElement('input')
                   $input.type = 'number'
                   $input.classList = 'dt-input'
@@ -127,7 +135,7 @@ Template.projectAccessRights.onRendered(() => {
         })
       } else {
         try {
-          templateInstance.projectAccessRightsDataTable.refresh(data, columns)
+          templateInstance.projectAccessRightsDataTable.refresh(data, securedColumns)
         } catch (projectAccessRefreshError) {
           console.error(`Caught error: ${projectAccessRefreshError}`)
         }

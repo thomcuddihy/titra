@@ -1,5 +1,9 @@
 import InboundInterfaces from '../inboundinterfaces.js'
 import { checkAdminAuthentication } from '../../../utils/server_method_helpers.js'
+import {
+  INBOUND_ADMIN_INTERFACE_FIELDS,
+  publishAdminCollection,
+} from '../../../utils/adminCollectionPublication.js'
 
 /**
  * Publishes the inbound interfaces to the client.
@@ -10,6 +14,11 @@ import { checkAdminAuthentication } from '../../../utils/server_method_helpers.j
  * @returns {Mongo.Cursor} The cursor containing the inbound interfaces.
  */
 Meteor.publish('inboundinterfaces', async function getInboundInterfaces() {
-  checkAdminAuthentication(this)
-  return InboundInterfaces.find({})
+  await checkAdminAuthentication(this)
+  return publishAdminCollection(this, {
+    users: Meteor.users,
+    collection: InboundInterfaces,
+    collectionName: 'inboundinterfaces',
+    fields: INBOUND_ADMIN_INTERFACE_FIELDS,
+  })
 })

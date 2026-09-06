@@ -1,10 +1,11 @@
 import './datatable.html'
 import { t } from '../../utils/i18n.js'
+import { secureDataTableColumns } from '../../utils/dataTableSecurity.js'
 
 Template.datatable.onRendered(() => {
   const templateInstance = Template.instance()
   templateInstance.autorun(() => {
-    const columns = templateInstance.data.columns?.get()
+    const columns = secureDataTableColumns(templateInstance.data.columns?.get())
     const data = templateInstance.data.data?.get()
     if (columns && data) {
       if (!templateInstance.datatableInstance) {

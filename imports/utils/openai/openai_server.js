@@ -1,33 +1,53 @@
 import { fetch } from 'meteor/fetch'
+import { Meteor } from 'meteor/meteor'
+import { OAuth } from 'meteor/oauth'
 import { getGlobalSettingAsync } from '../server_method_helpers'
+import { fetchOidcJson } from '../oidc/oidcSecurity.js'
+import {
+  DEFAULT_OPENAI_MODEL,
+  normalizeOpenAIAPIKey,
+  normalizeOpenAIModel,
+  normalizeOpenAIPrompt,
+  parseOpenAIJsonResult,
+} from './openaiSecurity.js'
 
 export const getOpenAIResponse = async (prompt) => {
-  if (!await getGlobalSettingAsync('openai_apikey')) {
-    try {
-      const aiResponse = await fetch('https://api.openai.com/v1/chat/completions', {
+  const storedKey = await getGlobalSettingAsync('openai_apikey')
+  if (!storedKey) throw new Meteor.Error('notifications.OpenAI_API_key_not_set')
+  try {
+    const apiKey = normalizeOpenAIAPIKey(OAuth.openSecret(storedKey))
+    const model = normalizeOpenAIModel(process.env.TITRA_OPENAI_MODEL || DEFAULT_OPENAI_MODEL)
+    const aiResponseContent = await fetchOidcJson(
+      fetch,
+      'https://api.openai.com/v1/chat/completions',
+      {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${await getGlobalSettingAsync('openai_apikey')}`,
+          Authorization: `Bearer ${apiKey}`,
           Accept: 'application/json',
         },
         body: JSON.stringify({
-          model: 'gpt-3.5-turbo',
+          model,
           messages: [
             {
               role: 'user',
-              content: prompt,
+              content: normalizeOpenAIPrompt(prompt),
             },
           ],
-          temperature: 0,
+          reasoning_effort: 'none',
+          response_format: { type: 'json_object' },
+          max_completion_tokens: 500,
         }),
-      })
-      const aiResponseContent = await aiResponse.json()
-      return JSON.parse(aiResponseContent?.choices[0]?.message?.content)
-    } catch (e) {
-      throw new Meteor.Error('notifications.OpenAI_error', e.message)
-    }
+      },
+      { maximumBytes: 128 * 1024 },
+    )
+    return parseOpenAIJsonResult(aiResponseContent)
+  } catch {
+    throw new Meteor.Error(
+      'notifications.OpenAI_error',
+      'The language-model request could not be completed.',
+    )
   }
-  throw new Meteor.Error('notifications.OpenAI_API_key_not_set')
 }
 export default getOpenAIResponse

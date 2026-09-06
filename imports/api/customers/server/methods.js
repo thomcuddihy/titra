@@ -1,6 +1,22 @@
 import { ValidatedMethod } from 'meteor/mdg:validated-method'
+import { DDPRateLimiter } from 'meteor/ddp-rate-limiter'
+import { check, Match } from 'meteor/check'
 import Projects from '../../projects/projects.js'
 import { authenticationMixin } from '../../../utils/server_method_helpers.js'
+import { aggregateBoundedCustomers } from './customerReadLimits.js'
+
+DDPRateLimiter.addRule({
+  type: 'method',
+  name: 'getAllCustomers',
+  userId(userId) { return typeof userId === 'string' && userId.length > 0 },
+}, 60, 60 * 1000)
+DDPRateLimiter.addRule({
+  type: 'method',
+  name: 'getAllCustomers',
+  clientAddress(clientAddress) {
+    return typeof clientAddress === 'string' && clientAddress.length > 0
+  },
+}, 120, 60 * 1000)
 
 /**
  * A ValidatedMethod that retrieves all customers from the Projects collection.
@@ -16,10 +32,16 @@ import { authenticationMixin } from '../../../utils/server_method_helpers.js'
  */
 const getAllCustomers = new ValidatedMethod({
   name: 'getAllCustomers',
-  validate: null,
+  validate(args) {
+    check(args, Match.Maybe({}))
+  },
   mixins: [authenticationMixin],
   async run() {
-    return Projects.rawCollection().aggregate([{ $match: { $or: [{ userId: this.userId }, { public: true }, { team: this.userId }] } }, { $group: { _id: '$customer' } }]).toArray()
+    return aggregateBoundedCustomers({
+      aggregate: (pipeline, options) => Projects.rawCollection()
+        .aggregate(pipeline, options).toArray(),
+      userId: this.userId,
+    })
   },
 })
 

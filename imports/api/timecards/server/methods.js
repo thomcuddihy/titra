@@ -1,11 +1,15 @@
 import { ValidatedMethod } from 'meteor/mdg:validated-method'
+import { DDPRateLimiter } from 'meteor/ddp-rate-limiter'
+import { OAuth } from 'meteor/oauth'
 import dayjs from 'dayjs'
 import { fetch } from 'meteor/fetch'
 import { check, Match } from 'meteor/check'
 import { NodeVM } from '../../../utils/vm_sandbox.js'
+import { legacyScriptDecision } from '../../../utils/legacyScriptPolicy.js'
 import Timecards from '../timecards.js'
 import Tasks from '../../tasks/tasks.js'
 import Projects from '../../projects/projects.js'
+import { refreshPersonalTaskSuggestion } from '../../tasks/server/taskSuggestions.js'
 import { t } from '../../../utils/i18n.js'
 import { emojify } from '../../../utils/frontend_helpers'
 import { sanitizeObject } from '../../../utils/sanitizer.js'
@@ -22,6 +26,20 @@ import {
   calculateSimilarity,
 } from '../../../utils/server_method_helpers.js'
 import { getOpenAIResponse } from '../../../utils/openai/openai_server.js'
+import { fetchOidcJson } from '../../../utils/oidc/oidcSecurity.js'
+import { normalizeStoredGoogleAccessToken } from '../../../utils/google/googleOAuthSecurity.js'
+import {
+  GOOGLE_RESPONSE_MAX_BYTES,
+  assertGoogleWorkspaceDateRange,
+  googleCalendarEventsUrl,
+  googleGmailListUrl,
+  googleGmailMessageUrl,
+  mapInBoundedBatches,
+  normalizeCalendarEventsResponse,
+  normalizeGmailListResponse,
+  normalizeGmailMessageResponse,
+  partitionOpenAIEnrichmentBudget,
+} from '../../../utils/google/googleWorkspaceSecurity.js'
 import {
   buildTimecardDateFields,
   dateOnlyFromUTCDate,
@@ -30,12 +48,127 @@ import {
   isStartTime,
   timecardDateAggregationExpression,
 } from '../../../utils/timecardDate.js'
-import { timecardDateStateSelector } from '../../../utils/timecardRevision.js'
+import { matchesTimecardDateRevision } from '../../../utils/timecardRevision.js'
+import { editOwnedTimecardTask } from './taskEdit.js'
+import { editOwnedTimecardDetails } from './detailsEdit.js'
+import {
+  MAX_BULK_TIMECARD_ENTRIES,
+  MAX_WEEK_MUTATION_ENTRIES,
+  assertTimecardMutationBatch,
+  assertTimecardMutationInput,
+} from './mutationInput.js'
+import {
+  canRegisterTime,
+  runAuthorizedTimecardCreateRule,
+} from './createAuthorization.js'
+import {
+  evaluateTimeEntryRule,
+  timeEntryRuleInternalError,
+} from './timeEntryRuleOutcome.js'
+import {
+  insertDocumentWithId,
+  recoverCreatedDocument,
+} from '../../apiidempotency/server/resourceCreate.js'
+import {
+  createProjectChildWithFence,
+  runWithProjectChildWriter,
+} from '../../projects/server/projectChildFence.js'
+import {
+  assertTimecardDateMigrationUnlocked,
+  withTimecardDateWriteLease,
+} from '../../timecarddatemigrations/timecarddatemigrations.js'
+import { setAuthorizedTimeEntryStates } from './stateMutation.js'
+import { currentProjectAudienceClauses } from '../../projects/server/publicAccessServer.js'
+import { sendSiwappInvoice } from '../../users/server/taskIntegrationProxy.js'
+import {
+  MAX_PROJECT_SCOPE_IDS,
+  MAX_TIMECARD_PUBLICATION_RECORDS,
+  MAX_WEEK_TIMECARD_RECORDS,
+  RESOURCE_QUERY_MAX_TIME_MS,
+  assertBoundedDateRange,
+  assertResultWithinLimit,
+  normalizeResourceScope,
+} from '../../../utils/resourceLimits.js'
+import { createActivePublicationGate } from '../../../utils/activePublicationGate.js'
+
+/* eslint-disable no-await-in-loop */
 
 const timeEntryForbiddenCustomfieldKeys = new Set([
   '_id', 'userId', 'projectId', 'date', 'dateOnly', 'startTime', 'dateRevision',
   'hours', 'task', 'taskRate', 'state', 'lastUsed', 'name', 'createdAt', 'updatedAt',
 ])
+const timecardDateFields = ['date', 'dateOnly', 'startTime', 'dateRevision']
+
+const projectChildFenceDependencies = {
+  findOneAndUpdate: (...args) => Projects.rawCollection().findOneAndUpdate(...args),
+  findOne: (selector) => Projects.findOneAsync(selector),
+  updateOne: (selector, modifier) => Projects.rawCollection().updateOne(selector, modifier),
+}
+const googleWorkspaceExecutionGate = createActivePublicationGate({
+  perUser: 1,
+  perPeer: 3,
+  total: 10,
+})
+
+function localCalendarSuggestion(event) {
+  return {
+    ...event,
+    customer: '',
+    date: dayjs(event.startTime).format('YYYY-MM-DD'),
+    duration: (Date.parse(event.endTime) - Date.parse(event.startTime)) / 1000 / 60 / 60,
+    origin: event.summary,
+  }
+}
+
+function localEmailSuggestion(message) {
+  const summary = message.snippet.substring(0, 50)
+  return {
+    date: dayjs(new Date(message.internalDate)).format('YYYY-MM-DD'),
+    sizeEstimate: message.sizeEstimate,
+    recipients: message.recipients,
+    subject: message.subject,
+    summary,
+    customer: '',
+    duration: 0.25,
+    origin: summary,
+  }
+}
+
+function attachClosestProject(item, projects) {
+  let closest
+  for (const project of projects) {
+    const score = calculateSimilarity(project.name, item.customer)
+    if (score > 0.3 && (!closest || score > closest.score)) closest = { project, score }
+  }
+  return { ...item, projectID: closest?.project._id || null }
+}
+
+async function timecardProjectSelector(projectId, userId) {
+  return {
+    _id: projectId,
+    $or: await currentProjectAudienceClauses(userId),
+  }
+}
+
+function refreshTaskSuggestion(userId, name) {
+  return refreshPersonalTaskSuggestion({ userId, name }, {
+    findOne: (selector) => Tasks.findOneAsync(selector),
+    insertOne: (document) => Tasks.insertAsync(document),
+    updateOne: (selector, modifier) => Tasks.updateAsync(selector, modifier),
+  })
+}
+
+function timecardDateCompareAndSwapSelector(timecard) {
+  const selector = { _id: timecard._id }
+  timecardDateFields.forEach((field) => {
+    if (Object.prototype.hasOwnProperty.call(timecard, field)) {
+      selector[field] = timecard[field]
+    } else {
+      selector[field] = { $exists: false }
+    }
+  })
+  return selector
+}
 
 function assertTimecardWriteSucceeded(result) {
   const affectedCount = result?.matchedCount != null
@@ -102,6 +235,8 @@ function assertWeekCellIsUnambiguous(matchingTimecards) {
  * @param {string} args.projectId - The ID of the project for the timecard.
  * @param {string} args.task - The task for the timecard.
  * @param {Date} args.date - The date of the timecard.
+ * @param {string} [args.dateOnly] - The calendar date in YYYY-MM-DD format.
+ * @param {string} [args.startTime] - The optional start time in HH:mm format.
  * @param {number} args.hours - The number of hours for the timecard.
  * @param {string} [args.userId] - The ID of the user for the timecard.
  * @param {Object} [args.customfields] - The custom fields for the timecard.
@@ -118,30 +253,54 @@ async function checkTimeEntryRule({
 }) {
   const dateFields = buildTimecardDateFields(date, dateOnly, startTime)
   const meteorUser = await Meteor.users.findOneAsync({ _id: userId })
-  const vm = new NodeVM({
-    wrapper: 'none',
-    timeout: 1000,
-    console: 'inherit', // Enable console logging for testing
-    sandbox: {
-      user: meteorUser.profile,
-      project: await Projects.findOneAsync({ _id: projectId }),
-      dayjs,
-      timecard: {
-        projectId,
-        task,
-        state,
-        ...dateFields,
-        hours,
-      },
-    },
-  })
-  try {
-    if (!await vm.run(await getGlobalSettingAsync('timeEntryRule'))) {
-      throw new Meteor.Error('notifications.time_entry_rule_failed')
-    }
-  } catch (error) {
-    throw new Meteor.Error(error.message)
+  const project = await Projects.findOneAsync({ _id: projectId })
+  const rule = await getGlobalSettingAsync('timeEntryRule')
+  if (!meteorUser || !project) throw timeEntryRuleInternalError()
+  const scriptPolicy = legacyScriptDecision('time-entry-rule', rule)
+  if (!scriptPolicy.allowed) {
+    throw new Meteor.Error(
+      'unsafe-legacy-script-disabled',
+      'The configured JavaScript time-entry rule is disabled by the server security policy.',
+    )
   }
+  if (!scriptPolicy.execute) {
+    await evaluateTimeEntryRule(rule, async () => scriptPolicy.literalResult)
+    return
+  }
+  let vm
+  try {
+    vm = new NodeVM({
+      wrapper: 'none',
+      timeout: 1000,
+      console: 'inherit', // Enable console logging for testing
+      sandbox: {
+        user: meteorUser.profile,
+        project,
+        dayjs,
+        timecard: {
+          projectId,
+          task,
+          state,
+          ...dateFields,
+          hours,
+        },
+      },
+    })
+  } catch (error) {
+    throw timeEntryRuleInternalError()
+  }
+  await evaluateTimeEntryRule(rule, (source) => vm.run(source))
+}
+
+function checkAuthorizedTimeEntryRule(ruleInput) {
+  return runAuthorizedTimecardCreateRule({
+    projectId: ruleInput.projectId,
+    userId: ruleInput.userId,
+    ruleInput,
+  }, {
+    findProject: (selector) => Projects.findOneAsync(selector),
+    checkRule: checkTimeEntryRule,
+  })
 }
 /**
  * Inserts a new timecard into the Timecards collection.
@@ -168,10 +327,50 @@ async function insertTimeCard(
   customfields,
   dateOnly,
   startTime,
+  options = {},
 ) {
-  const safeCustomfields = sanitizeObject(customfields, timeEntryForbiddenCustomfieldKeys)
-  const newTimeCard = {
-    ...safeCustomfields,
+  await assertTimecardDateMigrationUnlocked()
+  const newTimeCard = await buildAPITimeCardDocument({
+    projectId, task, date, hours, userId, taskRate, customfields, dateOnly, startTime,
+  })
+  const taskName = newTimeCard.task
+  const updateTaskSuggestion = () => refreshTaskSuggestion(userId, taskName)
+  if (!options.timecardId) await updateTaskSuggestion()
+  const targetTimecardId = options.timecardId || Random.id()
+  const result = await withTimecardDateWriteLease(async () => createProjectChildWithFence({
+    selector: await timecardProjectSelector(projectId, userId),
+    projectId,
+    reservationId: `timecard:${targetTimecardId}`,
+    kind: 'timecard-create',
+    resourceId: targetTimecardId,
+    createChild: async () => {
+      if (options.timecardId) {
+        return insertDocumentWithId(Timecards, newTimeCard, options.timecardId)
+      }
+      await Timecards.insertAsync({ ...newTimeCard, _id: targetTimecardId })
+      return { resourceId: targetTimecardId, created: true }
+    },
+    removeCreatedChild: (resourceId) => Timecards.rawCollection().deleteOne({
+      _id: resourceId, projectId, userId,
+    }),
+  }, projectChildFenceDependencies))
+  if (options.timecardId) {
+    // Suggestions are a derived convenience. Updating them after the atomic
+    // target insert lets a retry repair this side effect without duplicating
+    // the authoritative time entry.
+    await updateTaskSuggestion()
+    return options.returnCreationMetadata
+      ? { timecardId: result.resourceId, created: result.created }
+      : result.resourceId
+  }
+  return result.resourceId
+}
+
+async function buildAPITimeCardDocument({
+  projectId, task, date, hours, userId, taskRate, customfields, dateOnly, startTime,
+}) {
+  const document = {
+    ...sanitizeObject(customfields, timeEntryForbiddenCustomfieldKeys),
     userId,
     projectId,
     ...buildTimecardDateFields(date, dateOnly, startTime),
@@ -179,20 +378,78 @@ async function insertTimeCard(
     hours,
     task: await emojify(task),
   }
-  if (taskRate) {
-    newTimeCard.taskRate = taskRate
-  }
-  if (!await Tasks.findOneAsync({ $or: [{ userId }, { projectId }], name: await emojify(task) })) {
-    await Tasks.insertAsync({
-      ...safeCustomfields, userId, lastUsed: new Date(), name: await emojify(task),
+  if (taskRate) document.taskRate = taskRate
+  return document
+}
+
+async function recoverAPITimeCard(
+  projectId,
+  task,
+  date,
+  hours,
+  userId,
+  taskRate,
+  customfields,
+  dateOnly,
+  startTime,
+  timecardId,
+) {
+  const document = await buildAPITimeCardDocument({
+    projectId, task, date, hours, userId, taskRate, customfields, dateOnly, startTime,
+  })
+  // This is the authoritative recovery read for a previously reserved create.
+  // It intentionally has no mutable project/rule/migration/fence checks and no
+  // derived suggestion side effect: exact ID + full document equality is the
+  // only safe way to confirm a write whose acknowledgement was lost.
+  const recovered = await recoverCreatedDocument(Timecards, document, timecardId)
+  if (!recovered) return null
+  return { timecardId, created: false }
+}
+
+async function insertAPITimeCard(
+  projectId, task, date, hours, userId, taskRate, customfields, dateOnly, startTime, options = {},
+) {
+  await assertTimecardDateMigrationUnlocked()
+  try {
+    await checkAuthorizedTimeEntryRule({
+      userId, projectId, task, state: 'new', date, dateOnly, startTime, hours,
     })
-  } else {
-    await Tasks.updateAsync(
-      { $or: [{ userId }, { projectId }], name: await emojify(task) },
-      { $set: { ...safeCustomfields, lastUsed: new Date() } },
+  } catch (error) {
+    if (error?.error !== 'timecard-rule-blocked') throw error
+    throw new Meteor.Error(
+      'timecard-rule-blocked',
+      'The configured time entry rule prevented this time entry.',
     )
   }
-  return Timecards.insertAsync(newTimeCard)
+  return insertTimeCard(
+    projectId, task, date, hours, userId, taskRate, customfields, dateOnly, startTime, options,
+  )
+}
+
+async function insertIdempotentAPITimeCard(
+  projectId,
+  task,
+  date,
+  hours,
+  userId,
+  taskRate,
+  customfields,
+  dateOnly,
+  startTime,
+  timecardId,
+) {
+  return insertAPITimeCard(
+    projectId,
+    task,
+    date,
+    hours,
+    userId,
+    taskRate,
+    customfields,
+    dateOnly,
+    startTime,
+    { timecardId, returnCreationMetadata: true },
+  )
 }
 /**
  * Updates an existing timecard in the Timecards collection.
@@ -208,6 +465,7 @@ async function insertTimeCard(
  * @throws {Meteor.Error} If time entry rule fails.
  */
 async function upsertTimecard(projectId, task, date, hours, userId, dateOnly) {
+  await assertTimecardDateMigrationUnlocked()
   const { dateFields, taskName, selector } = await buildWeekTimecardContext(
     projectId,
     task,
@@ -215,83 +473,121 @@ async function upsertTimecard(projectId, task, date, hours, userId, dateOnly) {
     userId,
     dateOnly,
   )
-  const matchingTimecards = await Timecards.find(selector, {
-    sort: { _id: 1 },
-    limit: 2,
-  }).fetchAsync()
-  assertWeekCellIsUnambiguous(matchingTimecards)
-
-  if (!await Tasks.findOneAsync({ userId, name: taskName })) {
-    await Tasks.insertAsync({ userId, lastUsed: new Date(), name: taskName })
-  } else {
-    await Tasks.updateAsync(
-      { userId, name: taskName },
-      { $set: { lastUsed: new Date() } },
-    )
-  }
-  if (hours === 0) {
-    if (matchingTimecards.length === 1) {
-      const removed = await Timecards.rawCollection().deleteOne(
-        timecardDateStateSelector(matchingTimecards[0]),
+  await withTimecardDateWriteLease(async (assertWriterLease) => {
+    // Two rows are sufficient to prove this legacy week cell is ambiguous.
+    const matchingTimecards = await Timecards.find(selector, {
+      sort: { _id: 1 },
+      limit: 2,
+    }).fetchAsync()
+    assertWeekCellIsUnambiguous(matchingTimecards)
+    await refreshTaskSuggestion(userId, taskName)
+    if (hours === 0) {
+      for (const matchingTimecard of matchingTimecards) {
+        await assertWriterLease()
+        const removed = await Timecards.rawCollection().deleteOne(
+          timecardDateCompareAndSwapSelector(matchingTimecard),
+        )
+        assertTimecardWriteSucceeded(removed)
+      }
+    } else if (matchingTimecards.length === 1) {
+      // A single legacy entry may encode its start time in date. Updating a week
+      // cell must not destroy that timestamp when its timezone is unknown.
+      const fieldsForUpdate = !isDateOnly(matchingTimecards[0].dateOnly)
+        ? {}
+        : dateFields
+      await assertWriterLease()
+      const updated = await Timecards.rawCollection().updateOne(
+        timecardDateCompareAndSwapSelector(matchingTimecards[0]),
+        {
+          $set: {
+            userId,
+            projectId,
+            ...fieldsForUpdate,
+            hours,
+            task: taskName,
+          },
+          $inc: { dateRevision: 1 },
+        },
       )
-      assertTimecardWriteSucceeded(removed)
+      assertTimecardWriteSucceeded(updated)
+    } else {
+      await assertWriterLease()
+      const newTimecardId = Random.id()
+      await createProjectChildWithFence({
+        selector: await timecardProjectSelector(projectId, userId),
+        projectId,
+        reservationId: `timecard-week:${newTimecardId}`,
+        kind: 'timecard-week-upsert',
+        resourceId: newTimecardId,
+        createChild: async () => {
+          const updated = await Timecards.rawCollection().updateOne(
+            selector,
+            {
+              $set: {
+                userId,
+                projectId,
+                ...dateFields,
+                hours,
+                task: taskName,
+              },
+              $setOnInsert: { _id: newTimecardId },
+              $inc: { dateRevision: 1 },
+            },
+            { upsert: true },
+          )
+          assertTimecardWriteSucceeded(updated)
+          return {
+            resourceId: updated.upsertedCount === 1 ? newTimecardId : null,
+            created: updated.upsertedCount === 1,
+          }
+        },
+        removeCreatedChild: (resourceId) => Timecards.rawCollection().deleteOne({
+          _id: resourceId, projectId, userId,
+        }),
+      }, projectChildFenceDependencies)
     }
-  } else if (matchingTimecards.length === 1) {
-    // A legacy entry may encode its start time in date. A week-cell edit must
-    // not destroy that timestamp while its original timezone remains unknown.
-    const fieldsForUpdate = isDateOnly(matchingTimecards[0].dateOnly)
-      ? dateFields
-      : {}
-    const updated = await Timecards.rawCollection().updateOne(
-      timecardDateStateSelector(matchingTimecards[0]),
-      {
-        $set: {
-          userId,
-          projectId,
-          ...fieldsForUpdate,
-          hours,
-          task: taskName,
-        },
-        $inc: { dateRevision: 1 },
-      },
-    )
-    assertTimecardWriteSucceeded(updated)
-  } else {
-    const updated = await Timecards.rawCollection().updateOne(
-      selector,
-      {
-        $set: {
-          userId,
-          projectId,
-          ...dateFields,
-          hours,
-          task: taskName,
-        },
-        $inc: { dateRevision: 1 },
-      },
-      { upsert: true },
-    )
-    assertTimecardWriteSucceeded(updated)
-  }
+  })
   return 'notifications.success'
 }
+
+function isProjectAdministrator(project, userId) {
+  return project?.userId === userId || project?.admins?.includes(userId)
+}
+
+function canUserRegisterTimeForProject(project, userId) {
+  return canRegisterTime(project, userId)
+}
+
 async function checkProjectAdministratorAndUser(projectId, administratorId, userId) {
   const targetProject = await Projects.findOneAsync({ _id: projectId })
-  if (!targetProject
-      || !(targetProject.userId === administratorId
-      || targetProject.admins.indexOf(administratorId) >= 0)) {
+  if (!isProjectAdministrator(targetProject, administratorId)) {
     throw new Meteor.Error('notifications.only_administrator_can_register_time')
   }
   const user = await Meteor.users.findOneAsync({ 'profile.name': userId })
   if (!user) {
     throw new Meteor.Error('notifications.user_not_found')
   }
-  if (targetProject.public !== true
-      && targetProject.userId !== user._id
-      && targetProject.team.indexOf(user._id) === -1) {
+  if (!canUserRegisterTimeForProject(targetProject, user._id)) {
     throw new Meteor.Error('notifications.user_not_found_in_project')
   }
   return user._id
+}
+
+async function resolveBulkTimecardUserId(projectId, requestedUserId, callerUserId) {
+  const targetProject = await Projects.findOneAsync({ _id: projectId })
+  const targetUserId = requestedUserId || callerUserId
+  if (targetUserId !== callerUserId) {
+    if (!isProjectAdministrator(targetProject, callerUserId)) {
+      throw new Meteor.Error('notifications.only_administrator_can_register_time')
+    }
+    if (!await Meteor.users.findOneAsync({ _id: targetUserId })) {
+      throw new Meteor.Error('notifications.user_not_found')
+    }
+  }
+  if (!canUserRegisterTimeForProject(targetProject, targetUserId)) {
+    throw new Meteor.Error('notifications.user_not_found_in_project')
+  }
+  return targetUserId
 }
 /**
  * Inserts a new timecard into the Timecards collection.
@@ -318,6 +614,7 @@ const insertTimeCardMethod = new ValidatedMethod({
     check(args.taskRate, Match.Maybe(Number))
     check(args.customfields, Match.Maybe(Object))
     check(args.user, String)
+    assertTimecardMutationInput(args)
     assertModernTimecardDatePayload(args.dateOnly)
   },
   mixins: [authenticationMixin, transactionLogMixin],
@@ -328,7 +625,7 @@ const insertTimeCardMethod = new ValidatedMethod({
     if (user !== userId) {
       userId = await checkProjectAdministratorAndUser(projectId, userId, user)
     }
-    await checkTimeEntryRule({
+    await checkAuthorizedTimeEntryRule({
       userId, projectId, task, state: 'new', date, dateOnly, startTime, hours,
     })
     return insertTimeCard(
@@ -362,17 +659,20 @@ const upsertWeek = new ValidatedMethod({
   name: 'upsertWeek',
   validate(args) {
     check(args, Array)
+    assertTimecardMutationBatch(args, MAX_WEEK_MUTATION_ENTRIES)
     args.forEach((element) => {
       check(element.projectId, String)
       check(element.task, String)
       check(element.date, Date)
       check(element.dateOnly, Match.Maybe(Match.Where(isDateOnly)))
       check(element.hours, Number)
+      assertTimecardMutationInput(element)
       assertModernTimecardDatePayload(element.dateOnly)
     })
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run(weekArray) {
+    await assertTimecardDateMigrationUnlocked()
     await Promise.all(weekArray.map(async (element) => {
       const { selector } = await buildWeekTimecardContext(
         element.projectId,
@@ -387,7 +687,7 @@ const upsertWeek = new ValidatedMethod({
       }).fetchAsync()
       assertWeekCellIsUnambiguous(matchingTimecards)
     }))
-    await Promise.all(weekArray.map((element) => checkTimeEntryRule({
+    await Promise.all(weekArray.map((element) => checkAuthorizedTimeEntryRule({
       userId: this.userId,
       projectId: element.projectId,
       task: element.task,
@@ -397,8 +697,6 @@ const upsertWeek = new ValidatedMethod({
       hours: element.hours,
     })))
     for (const element of weekArray) {
-      // Keep duplicate cells in one request ordered so the revision check cannot race itself.
-      // eslint-disable-next-line no-await-in-loop
       await upsertTimecard(
         element.projectId,
         element.task,
@@ -438,32 +736,64 @@ const updateTimeCard = new ValidatedMethod({
     check(args.taskRate, Match.Maybe(Number))
     check(args.customfields, Match.Maybe(Object))
     check(args.user, String)
+    assertTimecardMutationInput(args)
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({
     projectId, _id, task, date, dateOnly, startTime, hours, taskRate, customfields, user,
   }) {
-    let { userId } = this
-    if (user !== userId) {
-      userId = await checkProjectAdministratorAndUser(projectId, userId, user)
+    await assertTimecardDateMigrationUnlocked()
+    const callerUserId = this.userId
+    let targetUserId = callerUserId
+    if (user !== callerUserId) {
+      targetUserId = await checkProjectAdministratorAndUser(
+        projectId,
+        callerUserId,
+        user,
+      )
     }
-    const timecard = await Timecards.findOneAsync({ _id })
+    const timecard = await Timecards.findOneAsync({ _id, userId: targetUserId })
+    if (!timecard) {
+      throw new Meteor.Error('not-authorized')
+    }
+    if (targetUserId !== callerUserId && timecard.projectId !== projectId) {
+      const sourceProject = await Projects.findOneAsync({
+        _id: timecard.projectId,
+        $or: [
+          { userId: callerUserId },
+          { admins: { $in: [callerUserId] } },
+        ],
+      })
+      if (!sourceProject) {
+        throw new Meteor.Error('notifications.only_administrator_can_register_time')
+      }
+    }
     if (isDateOnly(timecard?.dateOnly) && !isDateOnly(dateOnly)) {
       assertModernTimecardDatePayload(dateOnly)
     }
-    await checkTimeEntryRule({
-      userId, projectId, task, state: timecard.state, date, dateOnly, startTime, hours,
+    await checkAuthorizedTimeEntryRule({
+      userId: targetUserId,
+      projectId,
+      task,
+      state: timecard.state,
+      date,
+      dateOnly,
+      startTime,
+      hours,
     })
     const safeCustomfields = sanitizeObject(customfields, timeEntryForbiddenCustomfieldKeys)
-    if (!await Tasks.findOneAsync({ userId, name: await emojify(task) })) {
-      await Tasks.insertAsync({ ...safeCustomfields, userId, name: await emojify(task) })
-    }
+    await refreshTaskSuggestion(targetUserId, await emojify(task))
     const fieldsToSet = {
       ...safeCustomfields,
       projectId,
       ...buildTimecardDateFields(date, dateOnly, startTime),
       hours,
       task: await emojify(task),
+    }
+    const updateSelector = {
+      ...timecardDateCompareAndSwapSelector(timecard),
+      userId: targetUserId,
+      projectId: timecard.projectId,
     }
     const modifier = {
       $set: fieldsToSet,
@@ -474,9 +804,16 @@ const updateTimeCard = new ValidatedMethod({
     } else {
       modifier.$unset = { taskRate: '' }
     }
-    const result = await Timecards.rawCollection().updateOne(
-      timecardDateStateSelector(timecard),
-      modifier,
+    await assertTimecardDateMigrationUnlocked()
+    const result = await withTimecardDateWriteLease(
+      async () => runWithProjectChildWriter({
+        selector: await timecardProjectSelector(projectId, targetUserId),
+        projectId,
+        reservationId: `timecard-update:${_id}:${Random.id()}`,
+        kind: 'timecard-update',
+        resourceId: _id,
+        operation: () => Timecards.rawCollection().updateOne(updateSelector, modifier),
+      }, projectChildFenceDependencies),
     )
     assertTimecardWriteSucceeded(result)
   },
@@ -500,9 +837,26 @@ const deleteTimeCard = new ValidatedMethod({
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({ timecardId }) {
-    const timecard = await Timecards.findOneAsync({ _id: timecardId })
+    return deleteOwnedTimeCard(timecardId, this.userId)
+  },
+})
+
+async function deleteOwnedTimeCard(timecardId, userId, expectedDateRevision) {
+  await assertTimecardDateMigrationUnlocked()
+  const timecard = await Timecards.findOneAsync({ _id: timecardId, userId })
+  if (!timecard) {
+    throw new Meteor.Error('not-authorized')
+  }
+  if (expectedDateRevision !== undefined
+    && !matchesTimecardDateRevision(timecard, expectedDateRevision)) {
+    throw new Meteor.Error(
+      'timecard-write-conflict',
+      'The time entry changed after it was previewed. Reload and confirm it again.',
+    )
+  }
+  try {
     await checkTimeEntryRule({
-      userId: this.userId,
+      userId,
       projectId: timecard.projectId,
       task: timecard.task,
       state: timecard.state,
@@ -511,14 +865,70 @@ const deleteTimeCard = new ValidatedMethod({
       startTime: timecard.startTime,
       hours: timecard.hours,
     })
-    const result = await Timecards.rawCollection().deleteOne({
-      ...timecardDateStateSelector(timecard),
-      userId: this.userId,
-    })
-    assertTimecardWriteSucceeded(result)
-    return result.deletedCount
-  },
-})
+  } catch (error) {
+    if (error?.error !== 'timecard-rule-blocked') throw error
+    throw new Meteor.Error(
+      'timecard-rule-blocked',
+      'The configured time entry rule prevented this deletion.',
+    )
+  }
+  await assertTimecardDateMigrationUnlocked()
+  const result = await withTimecardDateWriteLease(
+    () => Timecards.rawCollection().deleteOne({
+      ...timecardDateCompareAndSwapSelector(timecard),
+      userId,
+    }),
+  )
+  assertTimecardWriteSucceeded(result)
+  return result.deletedCount
+}
+
+async function updateOwnedTimeCardTask(
+  timecardId, userId, task, expectedTask, expectedDateRevision,
+) {
+  return editOwnedTimecardTask({
+    timecardId, userId, task, expectedTask, expectedDateRevision,
+  }, {
+    findTimecard: (selector) => Timecards.findOneAsync(selector),
+    canAccessProject: async (projectId, callerUserId) => canUserRegisterTimeForProject(
+      await Projects.findOneAsync({ _id: projectId }), callerUserId,
+    ),
+    checkRule: checkTimeEntryRule,
+    assertUnlocked: assertTimecardDateMigrationUnlocked,
+    withWriteLease: withTimecardDateWriteLease,
+    withProjectWriter: async ({ projectId, userId }, write) => runWithProjectChildWriter({
+      selector: await timecardProjectSelector(projectId, userId),
+      projectId,
+      reservationId: `timecard-task:${timecardId}:${Random.id()}`,
+      kind: 'timecard-task-edit',
+      resourceId: timecardId,
+      operation: write,
+    }, projectChildFenceDependencies),
+    updateOne: (selector, modifier) => Timecards.rawCollection().updateOne(selector, modifier),
+  })
+}
+
+async function updateOwnedTimeCardDetails(options) {
+  return editOwnedTimecardDetails(options, {
+    findTimecard: (selector) => Timecards.findOneAsync(selector),
+    canAccessProject: async (projectId, callerUserId) => canUserRegisterTimeForProject(
+      await Projects.findOneAsync({ _id: projectId, lifecycleLock: { $exists: false } }),
+      callerUserId,
+    ),
+    checkRule: checkTimeEntryRule,
+    assertUnlocked: assertTimecardDateMigrationUnlocked,
+    withWriteLease: withTimecardDateWriteLease,
+    moveToProjectWithFence: async ({ projectId, userId, write }) => runWithProjectChildWriter({
+      selector: await timecardProjectSelector(projectId, userId),
+      projectId,
+      reservationId: `timecard-move:${options.timecardId}:${Random.id()}`,
+      kind: 'timecard-details-move',
+      resourceId: options.timecardId,
+      operation: write,
+    }, projectChildFenceDependencies),
+    updateOne: (selector, modifier) => Timecards.rawCollection().updateOne(selector, modifier),
+  })
+}
 /**
  * Creates an invoice in Siwapp through the API and
  * updates the state of a timecard in the Timecards collection.
@@ -550,7 +960,7 @@ const sendToSiwapp = new ValidatedMethod({
     projectId, timePeriod, userId, customer, dates,
   }) {
     const meteorUser = await Meteor.users.findOneAsync({ _id: this.userId })
-    if (!meteorUser.profile.siwappurl || !meteorUser.profile.siwapptoken) {
+    if (!meteorUser?.profile?.siwappurl || !meteorUser.profile.siwapptoken) {
       throw new Meteor.Error(t('notifications.siwapp_configuration'))
     }
     const timeEntries = []
@@ -566,7 +976,18 @@ const sendToSiwapp = new ValidatedMethod({
       sort: undefined,
     })
     const projectMap = new Map()
-    for (const timecard of await Timecards.find(selector[0]).fetchAsync()) {
+    const selectedTimecards = await Timecards.rawCollection().find(selector[0], {
+      projection: { _id: 1, projectId: 1, hours: 1 },
+      sort: { _id: 1 },
+      limit: MAX_TIMECARD_PUBLICATION_RECORDS + 1,
+      maxTimeMS: RESOURCE_QUERY_MAX_TIME_MS,
+    }).toArray()
+    assertResultWithinLimit(
+      selectedTimecards,
+      MAX_TIMECARD_PUBLICATION_RECORDS,
+      'Invoice time-entry selection',
+    )
+    for (const timecard of selectedTimecards) {
       timeEntries.push(timecard._id)
       const resource = meteorUser.profile.name
       const projectEntry = projectMap.get(timecard.projectId)
@@ -608,24 +1029,29 @@ const sendToSiwapp = new ValidatedMethod({
       }
     }
     try {
-      const response = await fetch(`${meteorUser.profile.siwappurl}/api/v1/invoices`, {
-        method: 'POST',
-        body: JSON.stringify(invoiceJSON),
-        headers: {
-          Authorization: `Token token=${meteorUser.profile.siwapptoken}`,
-          'Content-type': 'application/json',
+      await sendSiwappInvoice({
+        profile: {
+          ...meteorUser.profile,
+          siwapptoken: OAuth.openSecret(meteorUser.profile.siwapptoken),
         },
+        invoice: invoiceJSON,
       })
-      if (response.status === 201) {
-        await Timecards.updateAsync({ _id: { $in: timeEntries } }, { $set: { state: 'billed' } }, { multi: true })
-        return 'notifications.siwapp_success'
-      }
-      return response.statusText
-    } catch (error) {
-      throw new Meteor.Error(error)
+    } catch {
+      throw new Meteor.Error('siwapp-unavailable', 'The invoice service is unavailable.')
     }
+    await Timecards.updateAsync(
+      { _id: { $in: timeEntries } },
+      { $set: { state: 'billed' } },
+      { multi: true },
+    )
+    return 'notifications.siwapp_success'
   },
 })
+DDPRateLimiter.addRule({
+  type: 'method',
+  name: 'sendToSiwapp',
+  userId(userId) { return typeof userId === 'string' && userId.length > 0 },
+}, 5, 60 * 1000)
 /**
  * Gets the daily timecards sum for a given period.
  * @param {Object} args - The arguments object containing the timecard information.
@@ -669,11 +1095,17 @@ const getDailyTimecards = new ValidatedMethod({
       page,
     )
     const dailyHoursObject = {}
-    const totalTimeCardsRawCollection = await Timecards.rawCollection()
-      .aggregate(await buildDailyHoursSelectorAsync(projectId, period, dates, userId, customer, 0))
+    const countSelector = await buildDailyHoursSelectorAsync(
+      projectId, period, dates, userId, customer, limit, page, { countOnly: true },
+    )
+    const [countResult] = await Timecards.rawCollection()
+      .aggregate(countSelector, { maxTimeMS: RESOURCE_QUERY_MAX_TIME_MS })
       .toArray()
-    const totalEntries = totalTimeCardsRawCollection.length
-    const dailyHours = await Timecards.rawCollection().aggregate(aggregationSelector)
+    const totalEntries = countResult?.totalEntries || 0
+    const dailyHours = await Timecards.rawCollection().aggregate(
+      aggregationSelector,
+      { maxTimeMS: RESOURCE_QUERY_MAX_TIME_MS },
+    )
       .toArray()
     dailyHoursObject.dailyHours = dailyHours
     dailyHoursObject.totalEntries = totalEntries
@@ -723,11 +1155,17 @@ const getTotalHoursForPeriod = new ValidatedMethod({
       page,
     )
     const totalHoursObject = {}
-    const totalEntriesTimecardsRaw = await Timecards.rawCollection()
-      .aggregate(await buildTotalHoursForPeriodSelectorAsync(projectId, period, dates, userId, customer, 0))
+    const countSelector = await buildTotalHoursForPeriodSelectorAsync(
+      projectId, period, dates, userId, customer, limit, page, { countOnly: true },
+    )
+    const [countResult] = await Timecards.rawCollection()
+      .aggregate(countSelector, { maxTimeMS: RESOURCE_QUERY_MAX_TIME_MS })
       .toArray()
-    const totalEntries = totalEntriesTimecardsRaw.length
-    const totalHours = await Timecards.rawCollection().aggregate(aggregationSelector)
+    const totalEntries = countResult?.totalEntries || 0
+    const totalHours = await Timecards.rawCollection().aggregate(
+      aggregationSelector,
+      { maxTimeMS: RESOURCE_QUERY_MAX_TIME_MS },
+    )
       .toArray()
     for (const entry of totalHours) {
       entry.totalHours = Number(JSON.parse(JSON.stringify(entry)).totalHours.$numberDecimal)
@@ -776,15 +1214,38 @@ const getWorkingHoursForPeriod = new ValidatedMethod({
       limit,
       page,
     )
-    const totalEntriesTimecardsRaw = await Timecards.rawCollection()
-      .aggregate(await buildworkingTimeSelectorAsync(projectId, period, dates, userId, limit, page))
+    const countSelector = await buildworkingTimeSelectorAsync(
+      projectId, period, dates, userId, limit, page, { countOnly: true },
+    )
+    const [countResult] = await Timecards.rawCollection()
+      .aggregate(countSelector, { maxTimeMS: RESOURCE_QUERY_MAX_TIME_MS })
       .toArray()
-    const totalEntries = totalEntriesTimecardsRaw.length
+    const totalEntries = countResult?.totalEntries || 0
     const workingHoursObject = {}
     workingHoursObject.totalEntries = totalEntries
-    const workingHoursTimeCardsRaw = await Timecards.rawCollection().aggregate(aggregationSelector)
+    const workingHoursTimeCardsRaw = await Timecards.rawCollection().aggregate(
+      aggregationSelector,
+      { maxTimeMS: RESOURCE_QUERY_MAX_TIME_MS },
+    )
       .toArray()
-    const workingHours = await Promise.all(workingHoursTimeCardsRaw.map(workingTimeEntriesMapper))
+    const userIds = [...new Set(workingHoursTimeCardsRaw.map((entry) => entry._id.userId))]
+    const users = await Meteor.users.find({ _id: { $in: userIds } }, {
+      fields: { profile: 1 },
+    }).fetchAsync()
+    const settingNames = [
+      'addBreakToWorkingTime',
+      'breakDuration',
+      'breakStartTime',
+      'dailyStartTime',
+      'regularWorkingTime',
+    ]
+    const settingValues = await Promise.all(settingNames.map(getGlobalSettingAsync))
+    const mappingContext = {
+      usersById: new Map(users.map((user) => [user._id, user])),
+      settings: Object.fromEntries(settingNames.map((name, index) => [name, settingValues[index]])),
+    }
+    const workingHours = await Promise.all(workingHoursTimeCardsRaw
+      .map((entry) => workingTimeEntriesMapper(entry, mappingContext)))
     workingHoursObject.workingHours = workingHours
     return workingHoursObject
   },
@@ -810,25 +1271,17 @@ const setTimeEntriesState = new ValidatedMethod({
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({ timeEntries, state }) {
-    if (state === 'exported') {
-      await Timecards.updateAsync(
-        { _id: { $in: timeEntries } },
-        { $set: { state } },
-        { multi: true },
-      )
-    } else if (state === 'billed') {
-      await Timecards.updateAsync(
-        { _id: { $in: timeEntries } },
-        { $set: { state } },
-        { multi: true },
-      )
-    } else {
-      await Timecards.updateAsync(
-        { _id: { $in: timeEntries } },
-        { $set: { state } },
-        { multi: true },
-      )
-    }
+    return setAuthorizedTimeEntryStates({
+      callerId: this.userId,
+      timeEntries,
+      state,
+    }, {
+      findTimeEntries: (selector, options) => Timecards.find(selector, options).fetchAsync(),
+      findAdministeredProjectIds: async (selector, options) => (await Projects
+        .find(selector, options).fetchAsync()).map((project) => project._id),
+      updateTimeEntries: (selector, modifier) => Timecards.rawCollection()
+        .updateMany(selector, modifier),
+    })
   },
 })
 /**
@@ -859,20 +1312,42 @@ const deleteTimeCardsForWeek = new ValidatedMethod({
   async run({
     projectId, task, startDateOnly, endDateOnly,
   }) {
+    await assertTimecardDateMigrationUnlocked()
     const { startDate, endDate } = dateOnlyRange(startDateOnly, endDateOnly)
-    const matchingTimecards = await Timecards.find({
+    assertBoundedDateRange(startDate, endDate, {
+      label: 'Week deletion range',
+      maxDays: 31,
+    })
+    const selector = {
+      userId: this.userId,
       projectId,
       task,
       date: { $gte: startDate, $lte: endDate },
-    }, { sort: { _id: 1 } }).fetchAsync()
-    for (const timecard of matchingTimecards) {
-      // Delete the captured revisions in order so a concurrent edit reliably aborts the batch.
-      // eslint-disable-next-line no-await-in-loop
-      const result = await Timecards.rawCollection().deleteOne(
-        timecardDateStateSelector(timecard),
-      )
-      assertTimecardWriteSucceeded(result)
     }
+    await withTimecardDateWriteLease(async (assertWriterLease) => {
+      const matchingTimecards = await Timecards.find(selector, {
+        fields: {
+          date: 1, dateOnly: 1, startTime: 1, dateRevision: 1,
+        },
+        sort: { _id: 1 },
+        limit: MAX_WEEK_TIMECARD_RECORDS + 1,
+      }).fetchAsync()
+      assertResultWithinLimit(
+        matchingTimecards,
+        MAX_WEEK_TIMECARD_RECORDS,
+        'Week deletion',
+      )
+      for (const timecard of matchingTimecards) {
+        await assertWriterLease()
+        const result = await Timecards.rawCollection().deleteOne(
+          {
+            ...timecardDateCompareAndSwapSelector(timecard),
+            userId: this.userId,
+          },
+        )
+        assertTimecardWriteSucceeded(result)
+      }
+    })
   },
 })
 
@@ -894,150 +1369,134 @@ const getGoogleWorkspaceData = new ValidatedMethod({
   },
   mixins: [authenticationMixin],
   async run({ startDate, endDate }) {
-    const meteorUser = await Meteor.userAsync()
-    const { serviceData } = meteorUser.services.googleapi
-    let eventResponse = []
-    if (serviceData) {
-      const events = await fetch(`https://www.googleapis.com/calendar/v3/calendars/primary/events?singleEvents=true&timeMax=${encodeURIComponent(endDate.toISOString())}&timeMin=${encodeURIComponent(startDate.toISOString())}`, {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${serviceData.accessToken}`,
-          Accept: 'application/json',
-        },
-      })
-      const jsonEvents = await events.json()
-      const fetchedEvents = jsonEvents.items.map((event) => ({
-        summary: event.summary,
-        description: event.description?.substring(0, 255),
-        startTime: event.start?.dateTime,
-        endTime: event.end?.dateTime,
-        attendees: event.attendees,
-      }))
-      eventResponse = fetchedEvents
-      if (await getGlobalSettingAsync('openai_apikey') && fetchedEvents.length > 0) {
-        eventResponse = await Promise.all(fetchedEvents.map(async (eventData) => getOpenAIResponse(`Based on the following JSON representation of a calendar event, respond with a JSON object summarizing the event with as few words as possible. Add the date of the event and the duration in hours and try to identify the customer based on the majority of attendee e-mail addresses. Include the original un-altered summary in the origin field. Use the following schema for the return JSON:
-        \`Interface event {summary: string, duration:number, customer:string, date:date, origin:string}\`
-        ${JSON.stringify(eventData)}`)))
-      }
-      const emails = await fetch(`https://www.googleapis.com/gmail/v1/users/me/messages?q=in:sent%20after:${Date.parse(startDate) / 1000}%20before:${Date.parse(endDate) / 1000}`, {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${serviceData.accessToken}`,
-          Accept: 'application/json',
-        },
-      })
-      const emailIds = await emails.json()
-      let fetchedMessages = []
-      if (emailIds.messages) {
-        fetchedMessages = await Promise.all(emailIds.messages.map(async (emailId) => {
-          const message = await fetch(`https://www.googleapis.com/gmail/v1/users/me/messages/${emailId.id}?format=metadata`, {
-            method: 'GET',
-            headers: {
-              Authorization: `Bearer ${serviceData.accessToken}`,
-              Accept: 'application/json',
-            },
-          })
-          const jsonMessage = await message.json()
-          const returnMessage = {}
-          returnMessage.date = dayjs(new Date(Number.parseInt(jsonMessage.internalDate, 10))).format('YYYY-MM-DD')
-          returnMessage.sizeEstimate = jsonMessage.sizeEstimate
-          returnMessage.recipients = ''
-          const headers = jsonMessage.payload && jsonMessage.payload.headers
-          if (headers) {
-            for (const header of headers) {
-              if (header.name === 'Subject') {
-                returnMessage.subject = header.value
-              }
-              if (header.name === 'To') {
-                returnMessage.recipients += header.value
-              }
-              if (header.name === 'CC') {
-                returnMessage.recipients += header.value
-              }
-            }
-            if (await getGlobalSettingAsync('openai_apikey')) {
-              return getOpenAIResponse(`Based on the email representation in JSON format, respond with a JSON object with the following schema where you estimate the time it took to write the email in hours based on the snippet and sizeEstimate in bytes where 0.25 hours is the minimum and add it to the duration field, use date format "YYYY-MM-DD" for dates, summarize the content with as few words as possible, do not include the snippet in the summary, guess the customer company name based on the majority of recipient's mail address domain. Include the original un-altered summary in the origin field. Use the following schema for the return JSON:
-          \`Interface message {summary:string,customer:string,date:date,duration:number,origin:string}\`
-          ${JSON.stringify(jsonMessage)}`)
-            }
-            returnMessage.summary = jsonMessage.snippet.substring(0, 50)
-            returnMessage.duration = 0.25
-            returnMessage.origin = returnMessage.summary
-            return returnMessage
-          }
-          return returnMessage
-        }))
-      }
-      let returnEvents = eventResponse
-      if (await getGlobalSettingAsync('openai_apikey')) {
-        returnEvents = await Promise.all(eventResponse.map(async (event) => {
-          const projects = await Projects.find({
-            $and: [
-              {
-                $or: [{ userId: this.userId }, { public: true }, { team: this.userId }],
-              },
-              { $or: [{ archived: false }, { archived: { $exists: false } }] },
-            ],
-          }).fetchAsync()
-          const filteredProjects = projects.map((entry) => {
-            const score = calculateSimilarity(entry.name, event.customer)
-            if (score > 0.3) {
-              return {
-                ...entry,
-                score: calculateSimilarity(entry.name, event.customer),
-              }
-            }
-            return undefined
-          }).filter((entry) => entry !== undefined)
-          filteredProjects.sort((a, b) => b.score - a.score)
-          const updatedMessage = {
-            ...event,
-            projectID: filteredProjects.length > 0 ? filteredProjects[0]._id : null,
-          }
-          return updatedMessage
-        }))
-      } else {
-        returnEvents.map((event) => {
-          event.date = dayjs(event.startTime).format('YYYY-MM-DD')
-          event.duration = (Date.parse(event.endTime) - Date.parse(event.startTime))
-            / 1000 / 60 / 60
-          return event
-        })
-      }
-      let returnMessages = fetchedMessages
-      if (await getGlobalSettingAsync('openai_apikey')) {
-        returnMessages = await Promise.all(fetchedMessages.map(async (message) => {
-          const projects = await Projects.find({
-            $and: [
-              {
-                $or: [{ userId: this.userId }, { public: true }, { team: this.userId }],
-              },
-              { $or: [{ archived: false }, { archived: { $exists: false } }] },
-            ],
-          }).fetchAsync()
-          const filteredProjects = projects.map((entry) => {
-            const score = calculateSimilarity(entry.name, message.customer)
-            if (score > 0.3) {
-              return {
-                ...entry,
-                score: calculateSimilarity(entry.name, message.customer),
-              }
-            }
-            return undefined
-          }).filter((entry) => entry !== undefined)
-          filteredProjects.sort((a, b) => b.score - a.score)
-          const updatedMessage = {
-            ...message,
-            projectID: filteredProjects.length > 0 ? filteredProjects[0]._id : null,
-          }
-          return updatedMessage
-        }))
-      }
-      return { returnEvents, returnMessages }
+    const releaseExecutionSlot = googleWorkspaceExecutionGate.acquire({
+      userId: this.userId,
+      peerAddress: this.connection?.clientAddress,
+    })
+    if (!releaseExecutionSlot) {
+      throw new Meteor.Error(
+        'google-workspace-busy',
+        'A Google Workspace import is already running. Try again later.',
+      )
     }
-    throw new Meteor.Error('You need to authorize Google API access for titra first.')
+    try {
+      try {
+        assertGoogleWorkspaceDateRange(startDate, endDate)
+      } catch {
+        throw new Meteor.Error(
+          'google-workspace-invalid-range',
+          'Select a valid date range of no more than 31 days.',
+        )
+      }
+      const meteorUser = await Meteor.userAsync()
+      const serviceData = meteorUser?.services?.googleapi?.serviceData
+      let googleAccessToken
+      try {
+        googleAccessToken = normalizeStoredGoogleAccessToken(
+          OAuth.openSecret(serviceData?.accessToken),
+        )
+      } catch {
+        throw new Meteor.Error(
+          'google-workspace-authorization-required',
+          'Google Workspace authorization is required.',
+        )
+      }
+      let eventResponse = []
+      const openAIEnabled = Boolean(await getGlobalSettingAsync('openai_apikey'))
+      if (serviceData) {
+        const googleRequestOptions = {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${googleAccessToken}`,
+            Accept: 'application/json',
+          },
+        }
+        const jsonEvents = await fetchOidcJson(
+          fetch, googleCalendarEventsUrl(startDate, endDate), googleRequestOptions,
+          { maximumBytes: GOOGLE_RESPONSE_MAX_BYTES },
+        )
+        const fetchedEvents = normalizeCalendarEventsResponse(jsonEvents)
+        const emailIds = normalizeGmailListResponse(await fetchOidcJson(
+          fetch, googleGmailListUrl(startDate, endDate), googleRequestOptions,
+          { maximumBytes: GOOGLE_RESPONSE_MAX_BYTES },
+        ))
+        const enrichmentBudget = openAIEnabled
+          ? partitionOpenAIEnrichmentBudget(fetchedEvents.length, emailIds.length)
+          : { calendarEvents: 0, gmailMessages: 0 }
+        if (enrichmentBudget.calendarEvents) {
+          const enrichedEvents = await mapInBoundedBatches(
+            fetchedEvents.slice(0, enrichmentBudget.calendarEvents),
+            async (eventData) => getOpenAIResponse(`Based on the following JSON representation of a calendar event, respond with a JSON object summarizing the event with as few words as possible. Add the date of the event and the duration in hours and try to identify the customer based on the majority of attendee e-mail addresses. Include the original un-altered summary in the origin field. Use the following schema for the return JSON:
+            \`Interface event {summary: string, duration:number, customer:string, date:date, origin:string}\`
+            ${JSON.stringify(eventData)}`),
+            10,
+          )
+          eventResponse = [
+            ...enrichedEvents,
+            ...fetchedEvents.slice(enrichmentBudget.calendarEvents)
+              .map(localCalendarSuggestion),
+          ]
+        } else eventResponse = fetchedEvents.map(localCalendarSuggestion)
+        let fetchedMessages = []
+        let remainingMessageEnrichments = enrichmentBudget.gmailMessages
+        if (emailIds.length) {
+          fetchedMessages = await mapInBoundedBatches(emailIds, async (emailId) => {
+            const jsonMessage = normalizeGmailMessageResponse(await fetchOidcJson(
+              fetch, googleGmailMessageUrl(emailId), googleRequestOptions,
+              { maximumBytes: GOOGLE_RESPONSE_MAX_BYTES },
+            ))
+            const returnMessage = localEmailSuggestion(jsonMessage)
+            if (openAIEnabled && remainingMessageEnrichments > 0) {
+              remainingMessageEnrichments -= 1
+              return getOpenAIResponse(`Based on the email representation in JSON format, respond with a JSON object with the following schema where you estimate the time it took to write the email in hours based on the snippet and sizeEstimate in bytes where 0.25 hours is the minimum and add it to the duration field, use date format "YYYY-MM-DD" for dates, summarize the content with as few words as possible, do not include the snippet in the summary, guess the customer company name based on the majority of recipient's mail address domain. Include the original un-altered summary in the origin field. Use the following schema for the return JSON:
+              \`Interface message {summary:string,customer:string,date:date,duration:number,origin:string}\`
+              ${JSON.stringify(jsonMessage)}`)
+            }
+            return returnMessage
+          }, 10)
+        }
+        let returnEvents = eventResponse
+        let returnMessages = fetchedMessages
+        if (openAIEnabled) {
+          const projects = await Projects.find({
+            $and: [
+              { $or: await currentProjectAudienceClauses(this.userId) },
+              { $or: [{ archived: false }, { archived: { $exists: false } }] },
+            ],
+          }, {
+            fields: { _id: 1, name: 1 },
+            sort: { _id: 1 },
+            limit: MAX_PROJECT_SCOPE_IDS + 1,
+          }).fetchAsync()
+          assertResultWithinLimit(
+            projects,
+            MAX_PROJECT_SCOPE_IDS,
+            'Workspace project matching',
+          )
+          returnEvents = eventResponse.map((event) => attachClosestProject(event, projects))
+          returnMessages = fetchedMessages
+            .map((message) => attachClosestProject(message, projects))
+        }
+        return { returnEvents, returnMessages }
+      }
+      throw new Meteor.Error('You need to authorize Google API access for titra first.')
+    } finally {
+      releaseExecutionSlot()
+    }
   },
 })
+DDPRateLimiter.addRule({
+  type: 'method',
+  name: 'getGoogleWorkspaceData',
+  userId(userId) { return typeof userId === 'string' && userId.length > 0 },
+}, 1, 60 * 1000)
+DDPRateLimiter.addRule({
+  type: 'method',
+  name: 'getGoogleWorkspaceData',
+  clientAddress(clientAddress) {
+    return typeof clientAddress === 'string' && clientAddress.length > 0
+  },
+}, 3, 60 * 1000)
 /**
  * Retrieves user time cards for a specific period, filtered by project and task.
  *
@@ -1057,25 +1516,44 @@ const userTimeCardsForPeriodByProjectByTaskMethod = new ValidatedMethod({
   },
   mixins: [authenticationMixin],
   async run({ startDate, endDate, projectId }) {
+    const projectScope = normalizeResourceScope(projectId, 'Project', { allowAll: false })
+    assertBoundedDateRange(startDate, endDate, {
+      label: 'Week-table range',
+      maxDays: 31,
+    })
+    const selector = {
+      projectId: projectScope.value,
+      userId: this.userId,
+      date: { $gte: startDate, $lte: endDate },
+    }
+    const count = await Timecards.rawCollection().countDocuments(selector, {
+      limit: MAX_WEEK_TIMECARD_RECORDS + 1,
+      maxTimeMS: RESOURCE_QUERY_MAX_TIME_MS,
+    })
+    if (count > MAX_WEEK_TIMECARD_RECORDS) {
+      throw new Meteor.Error(
+        'result-too-large',
+        `The selected week contains more than ${MAX_WEEK_TIMECARD_RECORDS} time entries.`,
+      )
+    }
     return Timecards.rawCollection().aggregate([
       {
-        $match: {
-          projectId,
-          userId: this.userId,
-          date: { $gte: startDate, $lte: endDate },
-        },
+        $match: selector,
       },
       {
         $sort: {
           task: -1,
+          date: 1,
+          _id: 1,
         },
       },
+      { $limit: MAX_WEEK_TIMECARD_RECORDS },
       {
         $group: {
           _id: { $concat: ['$projectId', '|', '$task'] },
           entries: { $push: '$$ROOT' },
         },
-      }]).toArray()
+      }], { maxTimeMS: RESOURCE_QUERY_MAX_TIME_MS }).toArray()
   },
 })
 /**
@@ -1085,7 +1563,7 @@ const userTimeCardsForPeriodByProjectByTaskMethod = new ValidatedMethod({
  * @param {Object} args - The arguments for the method.
  * @param {Date} args.startDate - The start date of the week.
  * @param {Date} args.endDate - The end date of the week.
- * @returns {Promise<Array>} - A promise that resolves to an array of objects containing the date and the total hours worked for each day.
+ * @returns {Promise<Array>} A promise resolving to daily dates and total hours.
  */
 const getTotalForWeekPerDay = new ValidatedMethod({
   name: 'getTotalForWeekPerDay',
@@ -1095,6 +1573,7 @@ const getTotalForWeekPerDay = new ValidatedMethod({
   },
   mixins: [authenticationMixin],
   async run({ startDate, endDate }) {
+    assertBoundedDateRange(startDate, endDate, { label: 'Weekly totals range', maxDays: 31 })
     return Timecards.rawCollection().aggregate([
       {
         $match: {
@@ -1107,7 +1586,7 @@ const getTotalForWeekPerDay = new ValidatedMethod({
           _id: { date: timecardDateAggregationExpression() },
           totalForDate: { $sum: '$hours' },
         },
-      }]).toArray()
+      }], { maxTimeMS: RESOURCE_QUERY_MAX_TIME_MS }).toArray()
   },
 })
 /**
@@ -1126,6 +1605,7 @@ const getWeekTotal = new ValidatedMethod({
   },
   mixins: [authenticationMixin],
   async run({ startDate, endDate }) {
+    assertBoundedDateRange(startDate, endDate, { label: 'Week total range', maxDays: 31 })
     const aggregatedweek = await Timecards.rawCollection().aggregate([
       {
         $match: {
@@ -1138,7 +1618,7 @@ const getWeekTotal = new ValidatedMethod({
           _id: `${startDate}-${endDate}`,
           total: { $sum: '$hours' },
         },
-      }]).toArray()
+      }], { maxTimeMS: RESOURCE_QUERY_MAX_TIME_MS }).toArray()
     return aggregatedweek[0]?.total
   },
 })
@@ -1164,6 +1644,7 @@ const bulkInsertTimecards = new ValidatedMethod({
     check(args, {
       timecards: Array,
     })
+    assertTimecardMutationBatch(args.timecards, MAX_BULK_TIMECARD_ENTRIES)
     args.timecards.forEach((timecard) => {
       check(timecard, {
         projectId: String,
@@ -1176,22 +1657,24 @@ const bulkInsertTimecards = new ValidatedMethod({
         userId: Match.Maybe(String), // Optional userId
         customfields: Match.Maybe(Object), // Optional custom fields
       })
+      assertTimecardMutationInput(timecard)
       assertBulkTimecardDatePayload(timecard)
     })
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({ timecards }) {
+    const preparedTimecards = []
     const insertedTimecards = []
     for (const timecard of timecards) {
-      const userId = timecard.userId || this.userId
-      // Use provided userId or fallback to the current user
       const {
         projectId, task, date, dateOnly, startTime, hours, customfields,
       } = timecard
-      // Check time entry rules
-      // Preserve the existing all-or-error order for CSV bulk imports.
-      // eslint-disable-next-line no-await-in-loop
-      await checkTimeEntryRule({
+      const userId = await resolveBulkTimecardUserId(
+        projectId,
+        timecard.userId,
+        this.userId,
+      )
+      await checkAuthorizedTimeEntryRule({
         userId,
         projectId,
         task,
@@ -1201,8 +1684,14 @@ const bulkInsertTimecards = new ValidatedMethod({
         startTime,
         hours,
       })
-      // Insert the timecard
-      // eslint-disable-next-line no-await-in-loop
+      preparedTimecards.push({
+        projectId, task, date, dateOnly, startTime, hours, customfields, userId,
+      })
+    }
+    for (const timecard of preparedTimecards) {
+      const {
+        projectId, task, date, dateOnly, startTime, hours, customfields, userId,
+      } = timecard
       const timecardId = await insertTimeCard(
         projectId,
         task,
@@ -1223,6 +1712,13 @@ const bulkInsertTimecards = new ValidatedMethod({
   },
 })
 export {
+  checkTimeEntryRule,
+  deleteOwnedTimeCard,
+  updateOwnedTimeCardTask,
+  updateOwnedTimeCardDetails,
+  insertAPITimeCard,
+  insertIdempotentAPITimeCard,
+  recoverAPITimeCard,
   insertTimeCard,
   insertTimeCardMethod,
   upsertTimecard,
@@ -1242,3 +1738,5 @@ export {
   getTotalForWeekPerDay,
   bulkInsertTimecards,
 }
+
+

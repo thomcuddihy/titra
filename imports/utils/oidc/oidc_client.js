@@ -1,7 +1,7 @@
 import { OAuth } from 'meteor/oauth'
 import { Random } from 'meteor/random'
 import { ServiceConfiguration } from 'meteor/service-configuration'
-import { debugLog } from '../debugLog'
+import { normalizeOidcClientConfiguration } from './oidcSecurity.js'
 
 const SERVICE_NAME = 'oidc'
 const oidcReady = new ReactiveVar(false)
@@ -9,21 +9,29 @@ function registerOidc() {
   Accounts.oauth.registerService(SERVICE_NAME)
 
   Meteor.loginWithOidc = (callback) => {
-    debugLog('[OIDC] Meteor.loginWithOidc called')
     const options = {}
     const completeCallback = Accounts.oauth.credentialRequestCompleteHandler((...args) => {
-      debugLog('[OIDC] OIDC completeCallback invoked', ...args)
       if (callback) callback(...args)
     })
 
-    const config = ServiceConfiguration.configurations.findOne({ service: SERVICE_NAME })
-    debugLog('[OIDC] Loaded OIDC config', config)
-    if (!config) {
+    const storedConfig = ServiceConfiguration.configurations.findOne({ service: SERVICE_NAME })
+    if (!storedConfig) {
       if (completeCallback) {
-        debugLog('[OIDC] No OIDC config found, calling callback with error')
         completeCallback(
           new ServiceConfiguration.ConfigError('Service oidc not configured.'),
         )
+      }
+      return
+    }
+
+    let config
+    try {
+      config = normalizeOidcClientConfiguration(storedConfig, {
+        environment: typeof process === 'undefined' ? {} : process.env,
+      })
+    } catch {
+      if (completeCallback) {
+        completeCallback(new ServiceConfiguration.ConfigError('Service oidc not configured.'))
       }
       return
     }
@@ -32,7 +40,6 @@ function registerOidc() {
     const mobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|Windows Phone/i.test(navigator.userAgent)
     const display = mobile ? 'touch' : 'popup'
     const loginStyle = OAuth._loginStyle(SERVICE_NAME, config, options)
-    const scope = config.requestPermissions?.split(',') || ['openid', 'profile', 'email']
 
     // options
     options.client_id = config.clientId
@@ -40,25 +47,14 @@ function registerOidc() {
     options.redirect_uri = OAuth._redirectUri(SERVICE_NAME, config)
 //    options.redirectUrl = '/'
     options.state = OAuth._stateParam(loginStyle, credentialToken, options.redirectUrl)
-    options.scope = scope.join(' ')
+    options.scope = config.requestPermissions.join(' ')
 
     if (config.loginStyle) {
       options.display = display
     }
 
-    let loginUrl = config.authorizationEndpoint.startsWith('http') 
-      ? config.authorizationEndpoint 
-      : `${config.serverUrl}${config.authorizationEndpoint}`
-    // check if the loginUrl already contains a '?'
-    const hasExistingParams = loginUrl.indexOf('?') !== -1
-
-    if (!hasExistingParams) {
-      loginUrl += '?'
-    } else {
-      loginUrl += '&'
-    }
-
-    loginUrl += Object.keys(options).map((key) => [key, options[key]].map(encodeURIComponent).join('=')).join('&')
+    const loginUrl = new URL(config.authorizationEndpoint)
+    Object.entries(options).forEach(([key, value]) => loginUrl.searchParams.set(key, value))
 
     options.popupOptions = options.popupOptions || {}
     const popupOptions = {
@@ -66,11 +62,10 @@ function registerOidc() {
       height: options.popupOptions.height || 450,
     }
 
-    debugLog('[OIDC] Launching OAuth login', { loginService: SERVICE_NAME, loginStyle, loginUrl, credentialToken, popupOptions })
     OAuth.launchLogin({
       loginService: SERVICE_NAME,
       loginStyle,
-      loginUrl,
+      loginUrl: loginUrl.toString(),
       credentialRequestCompleteCallback: completeCallback,
       credentialToken,
       popupOptions,

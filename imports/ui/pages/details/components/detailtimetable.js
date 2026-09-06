@@ -26,6 +26,11 @@ import {
   getTimecardEndTime,
   getTimecardStartTime,
 } from '../../../../utils/timecardDate.js'
+import { encodeCsv } from '../../../../utils/csvExport.js'
+import {
+  escapeDataTableText,
+  secureDataTableColumns,
+} from '../../../../utils/dataTableSecurity.js'
 import './detailtimetable.html'
 import './pagination.js'
 import './limitpicker.js'
@@ -302,21 +307,23 @@ Template.detailtimetable.onRendered(() => {
               }
             }
             if (showEdit) {
+              const safeId = escapeDataTableText(value)
               return `<div class="text-center">
-                <a href="#" class="js-edit" data-id="${value}"><i class="fa fa-edit"></i></a>
-                <a href="#" class="js-delete" data-id="${value}"><i class="fa fa-trash"></i></a>
+                <a href="#" class="js-edit" data-id="${safeId}"><i class="fa fa-edit"></i></a>
+                <a href="#" class="js-delete" data-id="${safeId}"><i class="fa fa-trash"></i></a>
               </div>`
             }
             return ''
           },
         },
       )
+      const securedColumns = secureDataTableColumns(columns)
       if (!templateInstance.datatable) {
         import('frappe-datatable/dist/frappe-datatable.css').then(() => {
           import('frappe-datatable').then((datatable) => {
             const DataTable = datatable.default
             const datatableConfig = {
-              columns,
+              columns: securedColumns,
               data,
               serialNoColumn: false,
               clusterize: false,
@@ -368,7 +375,7 @@ Template.detailtimetable.onRendered(() => {
             if (getGlobalSetting('useState')) {
               datatableConfig
                 .getEditor = (colIndex, rowIndex, value, parent, column, row, editorData) => {
-                  if (column.name === t('details.state') && Timecards.findOne({ _id: editorData[editorData.length - 1] }).userId === Meteor.userId() && rowIndex !== 'totalRow') {
+                  if (column.id === 'state' && Timecards.findOne({ _id: editorData[editorData.length - 1] }).userId === Meteor.userId() && rowIndex !== 'totalRow') {
                     const $select = document.createElement('select')
                     $select.classList = 'form-control js-state-select'
                     parent.style.padding = 0
@@ -418,7 +425,7 @@ Template.detailtimetable.onRendered(() => {
         })
       } else {
         try {
-          templateInstance.datatable.refresh(data, columns)
+          templateInstance.datatable.refresh(data, securedColumns)
           $('.dt-scrollable').height(`${parseInt(document.querySelector('.dt-row.vrow:last-of-type')?.style.top, 10) + 40}px`)
         } catch (error) {
           console.error(`Caught error: ${error}`)
@@ -479,33 +486,33 @@ Template.detailtimetable.helpers({
 Template.detailtimetable.events({
   'click .js-export-csv': (event, templateInstance) => {
     event.preventDefault()
-    const csvArray = [`\uFEFF${t('globals.project')},${t('globals.date')},${t('globals.task')}`]
+    const csvRows = [[t('globals.project'), t('globals.date'), t('globals.task')]]
     if (getGlobalSetting('showResourceInDetails')) {
-      csvArray[0] = `${csvArray[0]},${t('globals.resource')}`
+      csvRows[0].push(t('globals.resource'))
     }
     if (getGlobalSetting('showCustomFieldsInDetails')) {
       if (CustomFields.find({ classname: 'time_entry' }).count() > 0) {
-        csvArray[0] = `${csvArray[0]},${CustomFields.find({ classname: 'time_entry' }).fetch().map((field) => field[customFieldType]).join(',')}`
+        csvRows[0].push(...CustomFields.find({ classname: 'time_entry' }).fetch()
+          .map((field) => field[customFieldType]))
       }
       if (CustomFields.find({ classname: 'project' }).count() > 0) {
-        csvArray[0] = `${csvArray[0]},${CustomFields.find({ classname: 'project' }).fetch().map((field) => field[customFieldType]).join(',')}`
+        csvRows[0].push(...CustomFields.find({ classname: 'project' }).fetch()
+          .map((field) => field[customFieldType]))
       }
     }
     if (getGlobalSetting('showCustomerInDetails')) {
-      csvArray[0] = `${csvArray[0]},${t('globals.customer')}`
+      csvRows[0].push(t('globals.customer'))
     }
     if (getGlobalSetting('useState')) {
-      csvArray[0] = `${csvArray[0]},${t('details.state')}`
+      csvRows[0].push(t('details.state'))
     }
     if (getGlobalSetting('useStartTime')) {
-      csvArray[0] = `${csvArray[0]},${t('details.startTime')}`
-      csvArray[0] = `${csvArray[0]},${t('details.endTime')}`
+      csvRows[0].push(t('details.startTime'), t('details.endTime'))
     }
-    csvArray[0] = `${csvArray[0]},${getUserTimeUnitVerbose()}`
+    csvRows[0].push(getUserTimeUnitVerbose())
     if (getGlobalSetting('showRateInDetails')) {
-      csvArray[0] = `${csvArray[0]},${t('project.rate')}`
+      csvRows[0].push(t('project.rate'))
     }
-    csvArray[0] = `${csvArray[0]}\r\n`
     const selector = structuredClone(templateInstance.selector.get()[0])
     selector.state = { $in: ['new', undefined] }
     for (const timeEntry of Timecards
@@ -524,10 +531,10 @@ Template.detailtimetable.events({
       else if (getGlobalSetting('useState') && getGlobalSetting('useStartTime') && getGlobalSetting('showRateInDetails')) {
         row[row.length - 5] = t(`details.${timeEntry[timeEntry.length - 6] ? timeEntry[timeEntry.length - 6] : 'new'}`)
       }
-      csvArray.push(`${row.join(',')}\r\n`)
+      csvRows.push(row)
     }
     saveAs(
-      new Blob(csvArray, { type: 'text/csv;charset=utf-8;header=present' }),
+      new Blob([encodeCsv(csvRows)], { type: 'text/csv;charset=utf-8;header=present' }),
       `titra_export_${dayjs().format('YYYYMMDD-HHmm')}_${$('#resourceselect option:selected').text().replace(' ', '_').toLowerCase()}.csv`,
     )
     Meteor.call('setTimeEntriesState', { timeEntries: Timecards.find(selector, templateInstance.selector.get()[1]).fetch().map((entry) => entry._id), state: 'exported' }, (error) => {
@@ -625,9 +632,9 @@ Template.detailtimetable.events({
       }
     })
   },
-  'click .js-invoice': (event, templateInstance) => {
+  'click .js-invoice': (event) => {
     event.preventDefault()
-    if (getUserSetting('siwappurl') && getUserSetting('siwapptoken')) {
+    if (getUserSetting('siwappurl')) {
       Meteor.call('sendToSiwapp', {
         projectId: $('.js-projectselect').val(),
         timePeriod: $('#period').val(),
@@ -750,3 +757,5 @@ Template.detailtimetable.onDestroyed(() => {
   }
   Template.instance().datatable = undefined
 })
+
+

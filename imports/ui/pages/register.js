@@ -28,21 +28,27 @@ Template.register.events({
         document.querySelector('.notification').classList.toggle('d-none')
         return
       }
-      Accounts.createUser({
+      const credentials = {
         email: templateInstance.$('#at-field-email').val(),
         password: templateInstance.$('#at-field-password').val(),
-        profile: {
-          name: templateInstance.$('#at-field-name').val(),
-          currentLanguageProject: t('globals.project'),
-          currentLanguageProjectDesc: t('project.first_project_desc'),
-        },
-      }, (error) => {
+        name: templateInstance.$('#at-field-name').val(),
+        currentLanguageProject: t('globals.project'),
+        currentLanguageProjectDesc: t('project.first_project_desc'),
+      }
+      Meteor.call('registerUser', credentials, (error) => {
         if (error && error.error !== 145546287) {
           console.error(error)
           templateInstance.$('.notification').text(`${t(`login.${error.error}`)} (${error.reason})`)
           document.querySelector('.notification').classList.toggle('d-none')
         } else {
-          FlowRouter.go('projectlist')
+          Meteor.loginWithPassword(credentials.email, credentials.password, (loginError) => {
+            if (loginError) {
+              templateInstance.$('.notification').text(t('notifications.auth_error_method'))
+              document.querySelector('.notification').classList.remove('d-none')
+              return
+            }
+            FlowRouter.go('projectlist')
+          })
         }
       })
     }

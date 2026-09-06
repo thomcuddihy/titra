@@ -2,10 +2,11 @@ import './projectInfoPopup.html'
 import { Meteor } from 'meteor/meteor'
 import Projects from '../../../../api/projects/projects.js'
 import '../../overview/components/projectProgress.js'
+import { projectDescriptionText } from '../../../../utils/userContentSecurity.js'
 
 Template.projectInfoPopup.onCreated(function projectInfoPopupCreated() {
   this.project = new ReactiveVar()
-  this.projectDescAsHtml = new ReactiveVar()
+  this.projectDescription = new ReactiveVar('')
 
   this.autorun(() => {
     // this will work only in the project select component context
@@ -19,21 +20,14 @@ Template.projectInfoPopup.onCreated(function projectInfoPopupCreated() {
       if (Template.parentData(1)?.projectId?.get()) {
         const project = Projects.findOne({ _id: Template.parentData(1).projectId.get() })
         this.project.set(project)
-        if (project?.desc instanceof Object) {
-          import('quill-delta-to-html').then((deltaToHtml) => {
-            const converter = new deltaToHtml.QuillDeltaToHtmlConverter(project.desc.ops, {})
-            this.projectDescAsHtml.set(converter.convert())
-          })
-        } else {
-          this.projectDescAsHtml.set(project?.desc)
-        }
+        this.projectDescription.set(projectDescriptionText(project?.desc))
       }
     }
   })
 })
 Template.projectInfoPopup.helpers({
   name: () => (Template.instance().project.get() ? Template.instance().project.get().name : false),
-  projectDescAsHtml: () => Template.instance().projectDescAsHtml.get(),
+  projectDescription: () => Template.instance().projectDescription.get(),
   desc: () => (Template.instance().project.get() ? Template.instance().project.get().desc : false),
   color: () => (Template.instance().project.get()
     ? Template.instance().project.get().color : Template.instance().color),

@@ -1,23 +1,69 @@
 import { ValidatedMethod } from 'meteor/mdg:validated-method'
+import { Match } from 'meteor/check'
+import { Meteor } from 'meteor/meteor'
+import { DDPRateLimiter } from 'meteor/ddp-rate-limiter'
 import bcrypt from 'bcrypt'
 import { Dashboards } from '../dashboards'
+import Projects from '../../projects/projects.js'
 import { sanitizeSlug } from '../../../utils/sanitizer'
 import {
   assertCanModifyDashboard, authenticationMixin, transactionLogMixin, getGlobalSettingAsync,
 } from '../../../utils/server_method_helpers.js'
+import {
+  MAX_DASHBOARDS_PER_CREATOR,
+  createDashboardCreationCoordinator,
+  dashboardCreatorQuotaAvailable,
+  dashboardInputProblem,
+  insertDashboardIfAuthorized,
+  loadDashboardCreationAccess,
+} from './creationSecurity.js'
 
 // dashboard passwords salt rounds
 const saltRounds = 10
-// Remove existing index first
+const dashboardCreationCoordinator = createDashboardCreationCoordinator()
+Meteor.startup(async () => {
+  // Dashboard creation relies on these constraints. Do not serve methods when
+  // Mongo cannot establish them exactly as reviewed.
+  await Promise.all([
+    Dashboards.rawCollection().createIndex(
+      { slug: 1 },
+      {
+        unique: true,
+        partialFilterExpression: { slug: { $exists: true, $gt: '' } },
+      },
+    ),
+    Dashboards.rawCollection().createIndex({ createdBy: 1, _id: 1 }),
+  ])
+})
 
-// Create index with partialFilterExpression only (no sparse)
-Dashboards.rawCollection().createIndex(
-  { slug: 1 },
-  {
-    unique: true,
-    partialFilterExpression: { slug: { $exists: true, $gt: '' } },
-  },
-)
+async function assertDashboardCreatorQuota(userId) {
+  const existing = await Dashboards.find({ createdBy: userId }, {
+    fields: { _id: 1 },
+    sort: { _id: 1 },
+    limit: MAX_DASHBOARDS_PER_CREATOR,
+  }).fetchAsync()
+  if (!dashboardCreatorQuotaAvailable(existing.length)) {
+    throw new Meteor.Error(
+      'dashboard-creator-quota',
+      `A user may create at most ${MAX_DASHBOARDS_PER_CREATOR} dashboards.`,
+    )
+  }
+}
+
+for (const name of ['addDashboard', 'updateDashboard']) {
+  DDPRateLimiter.addRule({
+    type: 'method',
+    name,
+    userId(userId) { return typeof userId === 'string' && userId.length > 0 },
+  }, 10, 60 * 1000)
+  DDPRateLimiter.addRule({
+    type: 'method',
+    name,
+    clientAddress(clientAddress) {
+      return typeof clientAddress === 'string' && clientAddress.length > 0
+    },
+  }, 20, 60 * 1000)
+}
 
 /**
  * Adds a dashboard.
@@ -46,11 +92,38 @@ const addDashboard = new ValidatedMethod({
       password: Match.Optional(String),
       slug: Match.Optional(String),
     })
+    const problem = dashboardInputProblem(args)
+    if (problem) throw new Match.Error(`Invalid dashboard ${problem}`)
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({
     projectId, timePeriod, resourceId, customer, startDate, endDate, password, slug,
   }) {
+    const findUser = (userId) => Meteor.users.findOneAsync({
+      _id: userId,
+      inactive: { $ne: true },
+    }, {
+      fields: {
+        isAdmin: 1,
+        inactive: 1,
+        'profile.timeunit': 1,
+        'profile.hoursToDays': 1,
+      },
+    })
+    const findProject = (id) => Projects.findOneAsync({ _id: id }, {
+      fields: { userId: 1, admins: 1, team: 1 },
+    })
+    const initialAccess = await loadDashboardCreationAccess({
+      userId: this.userId,
+      projectId,
+      findUser,
+      findProject,
+    })
+    if (!initialAccess.allowed) {
+      throw new Meteor.Error('not-authorized', 'You do not have permission to share this project')
+    }
+    await assertDashboardCreatorQuota(this.userId)
+    const meteorUser = initialAccess.user
     let inserted_slug
     if (slug) {
       const sanitizedSlug = sanitizeSlug(slug)
@@ -63,13 +136,12 @@ const addDashboard = new ValidatedMethod({
     } else {
       inserted_slug = null
     }
-    const meteorUser = await Meteor.users.findOneAsync({ _id: this.userId })
     let timeunit = await getGlobalSettingAsync('timeunit')
     let hoursToDays = await getGlobalSettingAsync('hoursToDays')
-    if (meteorUser.profile.timeunit) {
+    if (meteorUser.profile?.timeunit) {
       timeunit = meteorUser.profile.timeunit
     }
-    if (meteorUser.profile.hoursToDays) {
+    if (meteorUser.profile?.hoursToDays) {
       hoursToDays = meteorUser.profile.hoursToDays
     }
     let hashedPassword = null
@@ -77,9 +149,37 @@ const addDashboard = new ValidatedMethod({
       hashedPassword = await bcrypt.hash(password, saltRounds)
     }
     const _id = Random.id()
-    await Dashboards.insertAsync({
-      _id, projectId, timePeriod, customer, resourceId, startDate, endDate, timeunit, hoursToDays, password: hashedPassword, slug: inserted_slug,
-    })
+    const dashboard = {
+      _id,
+      projectId,
+      timePeriod,
+      customer,
+      resourceId,
+      startDate,
+      endDate,
+      timeunit,
+      hoursToDays,
+      password: hashedPassword,
+      slug: inserted_slug,
+      createdBy: this.userId,
+      ...(projectId === 'all' ? { allProjectsAuthorized: true } : {}),
+    }
+    const insertion = await dashboardCreationCoordinator.run(
+      this.userId,
+      () => insertDashboardIfAuthorized({
+        userId: this.userId,
+        projectId,
+        findUser,
+        findProject,
+        insert: async () => {
+          await assertDashboardCreatorQuota(this.userId)
+          return Dashboards.insertAsync(dashboard)
+        },
+      }),
+    )
+    if (!insertion.inserted) {
+      throw new Meteor.Error('not-authorized', 'You no longer have permission to share this project')
+    }
     return _id
   },
 })
@@ -108,6 +208,8 @@ const updateDashboard = new ValidatedMethod({
       slug: Match.Optional(String),
       password: Match.Optional(String),
     })
+    const problem = dashboardInputProblem(args, { update: true })
+    if (problem) throw new Match.Error(`Invalid dashboard ${problem}`)
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({

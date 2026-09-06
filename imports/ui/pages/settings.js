@@ -91,12 +91,14 @@ Template.settings.helpers({
   displayHoursToDays: () => Template.instance().displayHoursToDays.get(),
   enableWekan: () => getUserSetting('enableWekan'),
   siwappurl: () => getUserSetting('siwappurl'),
-  siwapptoken: () => getUserSetting('siwapptoken'),
-  titraAPItoken: () => getUserSetting('APItoken'),
+  siwapptoken: () => '',
+  // API tokens are intentionally write-only: never attempt a profile or
+  // global-settings fallback when rendering this replacement field.
+  titraAPItoken: () => '',
   zammadurl: () => getUserSetting('zammadurl'),
-  zammadtoken: () => getUserSetting('zammadtoken'),
+  zammadtoken: () => '',
   gitlaburl: () => getUserSetting('gitlaburl'),
-  gitlabtoken: () => getUserSetting('gitlabtoken'),
+  gitlabtoken: () => '',
   theme: () => getUserSetting('theme'),
 })
 
@@ -129,7 +131,7 @@ Template.settings.events({
         gitlaburl: templateInstance.$('#gitlaburl').val(),
         rounding: Number(templateInstance.$('#rounding').val()),
         theme: templateInstance.$('#theme').val(),
-        language: templateInstance.$('#language').val()
+        language: templateInstance.$('#language').val(),
       },
       (error) => {
         if (error) {
@@ -143,7 +145,7 @@ Template.settings.events({
   },
   'click #generateToken': (event, templateInstance) => {
     event.preventDefault()
-    templateInstance.$('#titraAPItoken').val(Random.id())
+    templateInstance.$('#titraAPItoken').val(Random.secret(32)).trigger('focus').trigger('select')
   },
   'change #timeunit': (event, templateInstance) => {
     event.preventDefault()

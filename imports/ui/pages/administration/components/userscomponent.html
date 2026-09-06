@@ -92,7 +92,17 @@
             <tbody>
                 {{#each user in users}}
                     <tr>
-                        <td>{{{avatar(user)}}}</td>
+                        <td>
+                          {{#with avatar user}}
+                            {{#if url}}
+                              <img src="{{url}}" alt="{{name}}" title="{{name}}" class="rounded" height="25" width="25"/>
+                            {{else}}
+                              <span class="rounded d-inline-flex align-items-center justify-content-center text-white"
+                                style="height:25px;width:25px;background-color:{{color}};font-size:0.7rem;"
+                                title="{{name}}">{{initials}}</span>
+                            {{/if}}
+                          {{/with}}
+                        </td>
                         <td>{{user.profile.name}}</td>
                         <td>{{user.emails.[0].address}}</td>
                         <td class="text-center">

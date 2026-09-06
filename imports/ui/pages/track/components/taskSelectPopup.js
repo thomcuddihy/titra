@@ -3,11 +3,33 @@ import utc from 'dayjs/plugin/utc'
 import './taskSelectPopup.html'
 import '../../../shared components/datatable.js'
 import Tasks from '../../../../api/tasks/tasks.js'
-import Projects from '../../../../api/projects/projects.js'
 import { i18nReady, t } from '../../../../utils/i18n.js'
 import {
-  getGlobalSetting, getUserSetting, addToolTipToTableCell,
+  getGlobalSetting, addToolTipToTableCell, showToast,
 } from '../../../../utils/frontend_helpers'
+import { taskSelectionCell } from '../../../../utils/taskSelectionMarkup.js'
+
+function popupProjectId(templateInstance) {
+  const projectId = templateInstance.data?.projectId
+  if (projectId && typeof projectId.get === 'function') return projectId.get()
+  return typeof projectId === 'string' ? projectId : null
+}
+
+function loadPopupIntegration(templateInstance, provider, destination, notification) {
+  const projectId = popupProjectId(templateInstance)
+  if (!projectId) return
+  const requestKey = `${provider}:${projectId}`
+  if (templateInstance.integrationSuggestionRequests.has(requestKey)) return
+  templateInstance.integrationSuggestionRequests.add(requestKey)
+  Meteor.call(
+    'taskIntegrations.listSuggestions',
+    { provider, projectId },
+    (error, suggestions) => {
+      destination.set(error ? false : suggestions)
+      if (error && notification) showToast(t(notification))
+    },
+  )
+}
 
 Template.taskSelectPopup.onCreated(function taskSelectPopupCreated() {
   dayjs.extend(utc)
@@ -22,12 +44,14 @@ Template.taskSelectPopup.onCreated(function taskSelectPopupCreated() {
   templateInstance.wekanTasksData = new ReactiveVar([])
   templateInstance.zammadTicketsData = new ReactiveVar()
   templateInstance.gitlabIssuesData = new ReactiveVar()
+  templateInstance.integrationSuggestionRequests = new Set()
+  templateInstance.wekanUnsupportedShown = false
   templateInstance.inboundInterfaces = new ReactiveVar()
   templateInstance.inboundInterfaceData = new ReactiveVar([])
   templateInstance.inboundInterfaceColumns = new ReactiveVar([
     {
       name: t('globals.task'),
-      format: (value) => `<button type="button" class="btn text-primary py-0 js-select-task" data-task="${value}"><i class="fa fa-plus"></i></button><span>${value}</span>`,
+      format: taskSelectionCell,
     },
     {
       name: t('globals.description'),
@@ -62,7 +86,7 @@ Template.taskSelectPopup.onCreated(function taskSelectPopupCreated() {
         templateInstance.localTasksColumns = new ReactiveVar([{
           name: t('task.addTask'),
           editable: false,
-          format: (value) => `<button type="button" class="btn text-primary py-0 js-select-task" data-task="${value}"><i class="fa fa-plus"></i></button><span>${value}</span>`,
+          format: taskSelectionCell,
         }, {
           name: t('task.lastUsed'),
           editable: false,
@@ -75,58 +99,26 @@ Template.taskSelectPopup.onCreated(function taskSelectPopupCreated() {
       }
       templateInstance.localTasksData
         .set(Tasks.find(taskFilter, { limit: templateInstance.limit.get(), sort: { lastUsed: -1 } })
-          .fetch().map((element) => [$('<div/>').text(element.name).html(), dayjs(element.lastUsed).format('YYYY/MM/DD')]))
+          .fetch().map((element) => [element.name, dayjs(element.lastUsed).format('YYYY/MM/DD')]))
     }
   })
   templateInstance.autorun(() => {
-    if (this.modalDisplayed.get() && this.data?.projectId?.get()) {
-      const project = Projects.findOne({ _id: this.data?.projectId?.get() })
-      if (project) {
-        if (project.wekanurl) {
-          if (Meteor.settings.public.sandstorm) {
-            const ddpcon = DDP.connect(project.wekanurl.replace('#', '/.sandstorm-token/'))
-            this.wekanTasks = new Mongo.Collection('cards', { connection: ddpcon })
-            ddpcon.subscribe('board', 'sandstorm')
-          } else if (project?.selectedWekanSwimlanes?.length > 0) {
-            const authToken = project?.wekanurl?.match(/authToken=(.*)/)[1]
-            const url = project.wekanurl.substring(0, project.wekanurl.indexOf('export?'))
-            const wekanAPITasks = []
-            for (const swimlane of project.selectedWekanSwimlanes) {
-              try {
-                window.fetch(`${url}swimlanes/${swimlane}/cards`, { headers: { Authorization: `Bearer ${authToken}` } }).then((response) => response.json()).then((innerResult) => {
-                  Array.prototype.push.apply(wekanAPITasks, innerResult)
-                  this.wekanAPITasks.set(wekanAPITasks)
-                })
-              } catch (error) {
-                console.error(error)
-              }
-            }
-          } else if (project.selectedWekanList.length > 0) {
-            let wekanLists = []
-            if (typeof project.selectedWekanList === 'string') {
-              wekanLists.push(project.selectedWekanList)
-            } else if (project.selectedWekanList instanceof Array) {
-              wekanLists = project.selectedWekanList
-            }
-            const authToken = project?.wekanurl?.match(/authToken=(.*)/)[1]
-            const url = project.wekanurl.substring(0, project.wekanurl.indexOf('export?'))
-            const wekanAPITasks = []
-            for (const wekanList of wekanLists) {
-              try {
-                window.fetch(`${url}lists/${wekanList}/cards`, { headers: { Authorization: `Bearer ${authToken}` } }).then((response) => response.json()).then((innerResult) => {
-                  Array.prototype.push.apply(wekanAPITasks, innerResult)
-                  this.wekanAPITasks.set(wekanAPITasks)
-                })
-              } catch (error) {
-                console.error(error)
-              }
-            }
-          }
-        } else {
-          this.wekanAPITasks.set(false)
-        }
+    if (!templateInstance.modalDisplayed.get() || !popupProjectId(templateInstance)
+      || !getGlobalSetting('enableWekan')) return
+    if (Meteor.settings?.public?.sandstorm) {
+      templateInstance.wekanAPITasks.set(false)
+      if (!templateInstance.wekanUnsupportedShown) {
+        templateInstance.wekanUnsupportedShown = true
+        showToast(t('notifications.wekan_sandstorm_unsupported'))
       }
+      return
     }
+    loadPopupIntegration(
+      templateInstance,
+      'wekan',
+      templateInstance.wekanAPITasks,
+      'notifications.wekan_error',
+    )
   })
   templateInstance.autorun(() => {
     if (templateInstance.modalDisplayed.get()) {
@@ -134,7 +126,7 @@ Template.taskSelectPopup.onCreated(function taskSelectPopupCreated() {
         templateInstance.wekanTasksColumns = new ReactiveVar([
           {
             name: t('globals.task'),
-            format: (value) => `<button type="button" class="btn text-primary py-0 js-select-task" data-task="${value}"><i class="fa fa-plus"></i></button><span>${value}</span>`,
+            format: taskSelectionCell,
           },
           {
             name: t('globals.description'),
@@ -160,44 +152,26 @@ Template.taskSelectPopup.onCreated(function taskSelectPopupCreated() {
         templateInstance.zammadTicketsColumns = new ReactiveVar([
           {
             name: t('globals.task'),
-            format: (value) => `<button type="button" class="btn text-primary py-0 js-select-task" data-task="${value}"><i class="fa fa-plus"></i></button><span>${value}</span>`,
+            format: taskSelectionCell,
           },
           {
             name: t('globals.description'),
             format: addToolTipToTableCell,
           }])
-        if (!templateInstance.zammadTicketsData.get() && getGlobalSetting('enableZammad') && getUserSetting('zammadurl') && getUserSetting('zammadtoken')) {
-          window.fetch(`${getUserSetting('zammadurl')}api/v1/tickets`, { headers: { Authorization: `Token token=${getUserSetting('zammadtoken')}` } }).then((response) => response.json()).then((result) => {
-            templateInstance.zammadTicketsData.set(result)
-          })
+        if (getGlobalSetting('enableZammad')) {
+          loadPopupIntegration(templateInstance, 'zammad', templateInstance.zammadTicketsData)
         }
         templateInstance.gitlabIssuesColumns = new ReactiveVar([
           {
             name: t('globals.task'),
-            format: (value) => `<button type="button" class="btn text-primary py-0 js-select-task" data-task="${value}"><i class="fa fa-plus"></i></button><span>${value}</span>`,
+            format: taskSelectionCell,
           },
           {
             name: t('globals.description'),
             format: addToolTipToTableCell,
           }])
-        if (!templateInstance.gitlabIssuesData.get() && getGlobalSetting('enableGitlab') && getUserSetting('gitlaburl') && getUserSetting('gitlabtoken')) {
-          const project = Projects.findOne({ _id: templateInstance.data?.projectId?.get() })
-          const query = project?.gitlabquery ? project?.gitlabquery : 'issues'
-          const headers = new Headers({
-            'PRIVATE-TOKEN': getUserSetting('gitlabtoken'),
-            'Access-Control-Allow-Credentials': 'true',
-            'Access-Control-Allow-Methods': 'GET,HEAD,OPTIONS,POST,PUT',
-            'Access-Control-Allow-Headers': 'Access-Control-Allow-Headers, Origin,Accept, X-Requested-With, Content-Type, Access-Control-Request-Method, Access-Control-Request-Headers, Authorization',
-
-          })
-          window.fetch(
-            `${getUserSetting('gitlaburl')}api/v4/${query}`,
-            {
-              headers,
-            },
-          ).then((response) => response.json()).then((result) => {
-            templateInstance.gitlabIssuesData.set(result)
-          })
+        if (getGlobalSetting('enableGitlab')) {
+          loadPopupIntegration(templateInstance, 'gitlab', templateInstance.gitlabIssuesData)
         }
       }
     }
@@ -222,7 +196,7 @@ Template.taskSelectPopup.helpers({
       }
       return true
     }).sort((a, b) => (a.title > b.title ? 1 : -1))
-    .map((element) => [element.title, element.note])),
+    .map((element) => [element.title, element.description])),
   gitlabIssuesColumns: () => Template.instance().gitlabIssuesColumns,
   gitlabIssuesData: () => new ReactiveVar(Template.instance().gitlabIssuesData.get()
     ?.slice(0, Template.instance().limit.get())

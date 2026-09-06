@@ -324,3 +324,5 @@ test('failed initial publication stops the acquired observer and clears retained
   assert.equal(stopCount, 1)
   assert.deepEqual(stats.snapshot(), zeroTotals)
 })
+
+

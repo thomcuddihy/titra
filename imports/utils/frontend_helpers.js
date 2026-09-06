@@ -1,5 +1,5 @@
-import namedavatar from 'namedavatar'
 import { i18nReady, t } from './i18n.js'
+import { avatarPresentation } from './userContentSecurity.js'
 import { Globalsettings } from '../api/globalsettings/globalsettings.js'
 import { projectResources } from '../api/users/users.js'
 import Projects from '../api/projects/projects.js'
@@ -63,21 +63,7 @@ function timeInUserUnit(time) {
   return false
 }
 function displayUserAvatar(meteorUser) {
-  if (meteorUser?.profile?.avatar) {
-    return `<img src="${meteorUser.profile.avatar}" alt="${meteorUser.profile.name}" style="height:25px" class="rounded"/>`
-  }
-  namedavatar.config({
-    nameType: 'initials',
-    backgroundColors:
-      [(meteorUser?.profile?.avatarColor
-        ? meteorUser.profile.avatarColor : '#455A64')],
-    minFontSize: 2,
-  })
-  const rawSVG = namedavatar.getSVG(meteorUser?.profile?.name ? meteorUser.profile.name : false)
-  rawSVG.classList = 'rounded'
-  rawSVG.style.width = '25px'
-  rawSVG.style.height = '25px'
-  return rawSVG.outerHTML
+  return avatarPresentation(meteorUser)
 }
 function validateEmail(email) {
   if (Meteor.loginWithLDAP) {

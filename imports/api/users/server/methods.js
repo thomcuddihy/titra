@@ -1,7 +1,81 @@
 import { ValidatedMethod } from 'meteor/mdg:validated-method'
 import { check, Match } from 'meteor/check'
 import { Accounts } from 'meteor/accounts-base'
+import { OAuth } from 'meteor/oauth'
 import { authenticationMixin, adminAuthenticationMixin, transactionLogMixin } from '../../../utils/server_method_helpers.js'
+import { appendWriteOnlyProfileSettings } from './settingsSecrets.js'
+import {
+  normalizeAvatarDataUrl,
+  normalizeHexColor,
+  normalizeProfileName,
+} from '../../../utils/userContentSecurity.js'
+import SecurityState from './securityState.js'
+import {
+  AdminSafetyError,
+  affectedExactlyOne,
+  assertAdministrativeContinuity,
+} from './adminSafety.js'
+import { requireOAuthEncryptionConfigured } from '../../../utils/oauthEncryptionPolicy.js'
+
+const ADMIN_MUTATION_LEASE_MS = 30 * 1000
+
+async function withAdminMutationLock(callback) {
+  const now = new Date()
+  const leaseToken = Random.secret(32)
+  let acquired
+  try {
+    acquired = await SecurityState.rawCollection().updateOne({
+      _id: 'administrator-mutation-lock',
+      $or: [
+        { leaseUntil: { $exists: false } },
+        { leaseUntil: { $lte: now } },
+      ],
+    }, {
+      $set: {
+        leaseToken,
+        leaseUntil: new Date(now.getTime() + ADMIN_MUTATION_LEASE_MS),
+      },
+    }, { upsert: true })
+  } catch (error) {
+    if (error?.code === 11000) throw new Meteor.Error('admin-operation-busy')
+    throw error
+  }
+  if (!affectedExactlyOne(acquired)) throw new Meteor.Error('admin-operation-busy')
+  try {
+    return await callback()
+  } finally {
+    await SecurityState.rawCollection().updateOne({
+      _id: 'administrator-mutation-lock', leaseToken,
+    }, { $unset: { leaseToken: '', leaseUntil: '' } })
+  }
+}
+
+function adminSafetyDependencies() {
+  return {
+    findUser: (userId) => Meteor.users.findOneAsync({ _id: userId }, {
+      fields: { _id: 1, isAdmin: 1, inactive: 1 },
+    }),
+    countActiveAdministrators: () => Meteor.users.find({
+      isAdmin: true, inactive: { $ne: true },
+    }).countAsync(),
+  }
+}
+
+async function requireAdministrativeContinuity(targetUserId, removesAccess) {
+  try {
+    return await assertAdministrativeContinuity(
+      { targetUserId, removesAccess }, adminSafetyDependencies(),
+    )
+  } catch (error) {
+    if (error instanceof AdminSafetyError) throw new Meteor.Error(error.code)
+    throw error
+  }
+}
+
+function rethrowUserContentValidation(error) {
+  if (error?.code) throw new Meteor.Error(error.code, error.message)
+  throw error
+}
 
 /**
  * Updates a user's settings.
@@ -78,34 +152,49 @@ const updateSettings = new ValidatedMethod({
     theme,
     language,
   }) {
-    await Meteor.users.updateAsync({ _id: this.userId }, {
-      $set: {
-        'profile.unit': unit,
-        'profile.startOfWeek': startOfWeek,
-        'profile.timeunit': timeunit,
-        'profile.timetrackview': timetrackview,
-        'profile.enableWekan': enableWekan,
-        'profile.hoursToDays': hoursToDays,
-        'profile.precision': precision,
-        'profile.siwapptoken': siwapptoken,
-        'profile.siwappurl': siwappurl,
-        'profile.APItoken': APItoken,
-        'profile.holidayCountry': holidayCountry,
-        'profile.holidayState': holidayState,
-        'profile.holidayRegion': holidayRegion,
-        'profile.dailyStartTime': dailyStartTime,
-        'profile.breakStartTime': breakStartTime,
-        'profile.breakDuration': breakDuration,
-        'profile.regularWorkingTime': regularWorkingTime,
-        'profile.zammadtoken': zammadtoken,
-        'profile.zammadurl': zammadurl,
-        'profile.gitlabtoken': gitlabtoken,
-        'profile.gitlaburl': gitlaburl,
-        'profile.rounding': rounding,
-        'profile.theme': theme,
-        'profile.language': language,
-      },
-    })
+    const ordinarySettings = {
+      'profile.unit': unit,
+      'profile.startOfWeek': startOfWeek,
+      'profile.timeunit': timeunit,
+      'profile.timetrackview': timetrackview,
+      'profile.enableWekan': enableWekan,
+      'profile.hoursToDays': hoursToDays,
+      'profile.precision': precision,
+      'profile.siwappurl': siwappurl,
+      'profile.holidayCountry': holidayCountry,
+      'profile.holidayState': holidayState,
+      'profile.holidayRegion': holidayRegion,
+      'profile.dailyStartTime': dailyStartTime,
+      'profile.breakStartTime': breakStartTime,
+      'profile.breakDuration': breakDuration,
+      'profile.regularWorkingTime': regularWorkingTime,
+      'profile.zammadurl': zammadurl,
+      'profile.gitlaburl': gitlaburl,
+      'profile.rounding': rounding,
+      'profile.theme': theme,
+      'profile.language': language,
+    }
+    let writeOnlySettings
+    try {
+      const suppliedSecrets = [siwapptoken, zammadtoken, gitlabtoken]
+        .some((value) => typeof value === 'string' && value.trim())
+      if (suppliedSecrets) requireOAuthEncryptionConfigured()
+      writeOnlySettings = appendWriteOnlyProfileSettings(
+        ordinarySettings,
+        { siwapptoken, zammadtoken, gitlabtoken },
+        { sealSecret: (value) => OAuth.sealSecret(value) },
+      )
+    } catch {
+      throw new Meteor.Error('settings-invalid', 'One or more settings are invalid.')
+    }
+    const modifier = { $set: writeOnlySettings }
+    if (typeof APItoken === 'string' && APItoken.trim()) {
+      if (!APItoken.isWellFormed() || [...APItoken].length > 512) {
+        throw new Meteor.Error('api-token-invalid', 'API token is invalid.')
+      }
+      modifier.$set['profile.APItoken'] = APItoken
+    }
+    await Meteor.users.updateAsync({ _id: this.userId }, modifier)
   },
 })
 
@@ -132,6 +221,8 @@ const resetUserSettings = new ValidatedMethod({
         'profile.breakStartTime': '',
         'profile.breakDuration': '',
         'profile.regularWorkingTime': '',
+        'profile.siwapptoken': '',
+        'profile.siwappurl': '',
         'profile.holidayCountry': '',
         'profile.holidayState': '',
         'profile.holidayRegion': '',
@@ -165,21 +256,31 @@ const updateProfile = new ValidatedMethod({
   async run({
     name, avatar, avatarColor,
   }) {
+    let normalizedName
+    let normalizedAvatar
+    let normalizedAvatarColor
+    try {
+      normalizedName = normalizeProfileName(name)
+      normalizedAvatar = normalizeAvatarDataUrl(avatar)
+      normalizedAvatarColor = normalizeHexColor(avatarColor, { fallback: '#455A64' })
+    } catch (error) {
+      rethrowUserContentValidation(error)
+    }
     const user = await Meteor.users.findOneAsync({ _id: this.userId })
 
     // Check if this is an anonymous user being converted to a named user
     const wasAnonymous = !user.emails || user.emails.length === 0
-    const isBecomingNamed = name && name.length > 0
-
-    if (!avatar) {
-      await Meteor.users.updateAsync({ _id: this.userId }, { $unset: { 'profile.avatar': '' } })
-    }
-    await Meteor.users.updateAsync({ _id: this.userId }, {
+    const isBecomingNamed = normalizedName.length > 0
+    const profileModifier = {
       $set: {
-        'profile.name': name,
-        'profile.avatar': avatar,
-        'profile.avatarColor': avatarColor,
+        'profile.name': normalizedName,
+        'profile.avatarColor': normalizedAvatarColor,
       },
+    }
+    if (normalizedAvatar) profileModifier.$set['profile.avatar'] = normalizedAvatar
+    else profileModifier.$unset = { 'profile.avatar': '' }
+    await Meteor.users.updateAsync({ _id: this.userId }, {
+      ...profileModifier,
     })
 
     // If this was an anonymous user being converted and verification is enabled
@@ -216,11 +317,19 @@ const claimAdmin = new ValidatedMethod({
   mixins: [authenticationMixin, transactionLogMixin],
   async run() {
     const meteorUser = await Meteor.users.findOneAsync({ _id: this.userId })
-    if (await Meteor.users.find({ isAdmin: true }).countAsync() === 0) {
-      await Meteor.users.updateAsync({ _id: this.userId }, { $set: { isAdmin: true } })
-      return `Congratulations ${meteorUser.profile.name}, you are now admin.`
+    if (process.env.TITRA_ENABLE_ADMIN_RECOVERY !== 'true') {
+      throw new Meteor.Error('admin-recovery-disabled')
     }
-    throw new Meteor.Error('Unable to claim admin rights, only the first user on a server is allowed to do this.')
+    return withAdminMutationLock(async () => {
+      if (await Meteor.users.find({ isAdmin: true, inactive: { $ne: true } }).countAsync() !== 0) {
+        throw new Meteor.Error('admin-recovery-not-needed')
+      }
+      const updated = await Meteor.users.updateAsync({
+        _id: this.userId, inactive: { $ne: true },
+      }, { $set: { isAdmin: true } })
+      if (updated !== 1) throw new Meteor.Error('admin-recovery-failed')
+      return `Congratulations ${meteorUser.profile.name}, you are now admin.`
+    })
   },
 })
 /**
@@ -251,7 +360,15 @@ const adminCreateUser = new ValidatedMethod({
   async run({
     name, email, password, isAdmin, currentLanguageProject, currentLanguageProjectDesc,
   }) {
-    const profile = { currentLanguageProject, currentLanguageProjectDesc, name }
+    let normalizedName
+    try {
+      normalizedName = normalizeProfileName(name)
+    } catch (error) {
+      rethrowUserContentValidation(error)
+    }
+    const profile = {
+      currentLanguageProject, currentLanguageProjectDesc, name: normalizedName,
+    }
     const userId = await Accounts.createUserAsync({
       email, password, profile,
     })
@@ -275,7 +392,10 @@ const adminDeleteUser = new ValidatedMethod({
   },
   mixins: [adminAuthenticationMixin, transactionLogMixin],
   async run({ userId }) {
-    await Meteor.users.removeAsync({ _id: userId })
+    await withAdminMutationLock(async () => {
+      await requireAdministrativeContinuity(userId, true)
+      await Meteor.users.removeAsync({ _id: userId })
+    })
   },
 })
 /**
@@ -296,7 +416,10 @@ const adminToggleUserAdmin = new ValidatedMethod({
   },
   mixins: [adminAuthenticationMixin, transactionLogMixin],
   async run({ userId, isAdmin }) {
-    await Meteor.users.updateAsync({ _id: userId }, { $set: { isAdmin } })
+    await withAdminMutationLock(async () => {
+      await requireAdministrativeContinuity(userId, !isAdmin)
+      await Meteor.users.updateAsync({ _id: userId }, { $set: { isAdmin } })
+    })
   },
 })
 /**
@@ -317,7 +440,10 @@ const adminToggleUserState = new ValidatedMethod({
   },
   mixins: [adminAuthenticationMixin, transactionLogMixin],
   async run({ userId, inactive }) {
-    await Meteor.users.updateAsync({ _id: userId }, { $set: { inactive } })
+    await withAdminMutationLock(async () => {
+      await requireAdministrativeContinuity(userId, inactive)
+      await Meteor.users.updateAsync({ _id: userId }, { $set: { inactive } })
+    })
   },
 })
 /**
@@ -345,16 +471,7 @@ const setCustomPeriodDates = new ValidatedMethod({
     })
   },
 })
-/**
- * Start a timer for the current user
- * @throws {Meteor.Error} If user is not authenticated.
- * @returns {String} 'notifications.success' if successful
- * @param {Date} timestamp - The timestamp of the timer
- * @param {String} project - The project of the timer
- * @param {String} task - The task of the timer
- * @param {String} startTime - The start time of the timer
- * @param {Array} customFields - The custom fields of the timer
- */
+/** Update the current user's browser timer state. */
 const setTimer = new ValidatedMethod({
   name: 'setTimer',
   validate(args) {
@@ -365,34 +482,23 @@ const setTimer = new ValidatedMethod({
     check(args.customFields, Match.Maybe(Array))
   },
   mixins: [authenticationMixin, transactionLogMixin],
-  async run({
-    timestamp, project, task, startTime, customFields,
-  }) {
-    if (!timestamp) {
-      await Meteor.users.updateAsync({ _id: this.userId }, { $unset: { 'profile.timer': '' } })
-    } else {
-      await Meteor.users.updateAsync({ _id: this.userId }, { $set: { 'profile.timer': timestamp } })
+  async run({ timestamp, project, task, startTime, customFields }) {
+    const set = {}
+    const unset = {}
+    for (const [field, value] of [
+      ['timer', timestamp],
+      ['timer_project', project],
+      ['timer_task', task],
+      ['timer_custom_fields', customFields],
+      ['timer_start_time', startTime],
+    ]) {
+      if (value == null || value === '') unset[`profile.${field}`] = ''
+      else set[`profile.${field}`] = value
     }
-    if (!project) {
-      await Meteor.users.updateAsync({ _id: this.userId }, { $unset: { 'profile.timer_project': '' } })
-    } else {
-      await Meteor.users.updateAsync({ _id: this.userId }, { $set: { 'profile.timer_project': project } })
-    }
-    if (!task) {
-      await Meteor.users.updateAsync({ _id: this.userId }, { $unset: { 'profile.timer_task': '' } })
-    } else {
-      await Meteor.users.updateAsync({ _id: this.userId }, { $set: { 'profile.timer_task': task } })
-    }
-    if (!customFields) {
-      await Meteor.users.updateAsync({ _id: this.userId }, { $unset: { 'profile.timer_custom_fields': '' } })
-    } else {
-      await Meteor.users.updateAsync({ _id: this.userId }, { $set: { 'profile.timer_custom_fields': customFields } })
-    }
-    if (!startTime) {
-      await Meteor.users.updateAsync({ _id: this.userId }, { $unset: { 'profile.timer_start_time': '' } })
-    } else {
-      await Meteor.users.updateAsync({ _id: this.userId }, { $set: { 'profile.timer_start_time': startTime } })
-    }
+    const modifier = {}
+    if (Object.keys(set).length) modifier.$set = set
+    if (Object.keys(unset).length) modifier.$unset = unset
+    await Meteor.users.updateAsync({ _id: this.userId }, modifier)
   },
 })
 /**
@@ -485,7 +591,10 @@ const getUserVerificationUrl = new ValidatedMethod({
 
     // Get the webhook interface configuration
     const WebhookVerification = (await import('../../webhookverification/webhookverification.js')).default
-    const webhookInterface = await WebhookVerification.findOneAsync({ _id: webhookInterfaceId, active: true })
+    const webhookInterface = await WebhookVerification.findOneAsync({
+      _id: webhookInterfaceId,
+      active: true,
+    })
     
     if (!webhookInterface) {
       throw new Meteor.Error('webhook-not-found', 'Associated webhook verification interface not found or inactive')
