@@ -30,6 +30,7 @@ import {
   timeEntryRuleInternalError,
 } from './timeEntryRuleOutcome.js'
 import { canRegisterTime, runAuthorizedTimecardCreateRule } from './createAuthorization.js'
+import { setAuthorizedTimeEntryStates } from './stateMutation.js'
 import {
   MAX_BULK_TIMECARD_ENTRIES,
   MAX_WEEK_MUTATION_ENTRIES,
@@ -752,25 +753,17 @@ const setTimeEntriesState = new ValidatedMethod({
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({ timeEntries, state }) {
-    if (state === 'exported') {
-      await Timecards.updateAsync(
-        { _id: { $in: timeEntries } },
-        { $set: { state } },
-        { multi: true },
-      )
-    } else if (state === 'billed') {
-      await Timecards.updateAsync(
-        { _id: { $in: timeEntries } },
-        { $set: { state } },
-        { multi: true },
-      )
-    } else {
-      await Timecards.updateAsync(
-        { _id: { $in: timeEntries } },
-        { $set: { state } },
-        { multi: true },
-      )
-    }
+    return setAuthorizedTimeEntryStates({
+      callerId: this.userId,
+      timeEntries,
+      state,
+    }, {
+      findTimeEntries: (selector, options) => Timecards.find(selector, options).fetchAsync(),
+      findAdministeredProjectIds: async (selector, options) => (await Projects
+        .find(selector, options).fetchAsync()).map((project) => project._id),
+      updateTimeEntries: (selector, modifier) => Timecards.rawCollection()
+        .updateMany(selector, modifier),
+    })
   },
 })
 /**
