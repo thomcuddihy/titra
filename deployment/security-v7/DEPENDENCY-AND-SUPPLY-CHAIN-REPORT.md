@@ -45,17 +45,9 @@ After building the final image, inventory it and confirm that:
 - the server root reports `tar` 7.5.22 and `underscore` 1.13.8;
 - no `tar` 6.x package exists and every runtime `qs`/`tmp` package reports the reviewed version.
 
-The documented disposable SMTP integration test in `SMTP-INTEGRATION-TEST.md`
-passed against the final admitted application image
-`sha256:ff081f4398110f916546ab70105fa3f6ddc8a5cb259eae659d2265a67a6c4d87`.
-It resolved the candidate immutably, used the exact reviewed Mongo 7.0.40 image
-on an internal-only network, and confirmed that two concurrent Titra invitation
-calls resulted in one captured message and one private daily-mail fence. It also
-confirmed Nodemailer 9.1.1, complete labelled cleanup, no host-published ports,
-no relay capability, synthetic-only data, and no production contact.
-
-The same exact image passed `test_openpgp_runtime.cjs` with networking and
-writes disabled. The test used its installed Nodemailer adapter and OpenPGP
+The final local application image passed the runtime inventory checks above.
+It also passed `test_openpgp_runtime.cjs` with networking and writes disabled.
+The test used its installed Nodemailer adapter and OpenPGP
 6.3.1 runtime to generate an ephemeral ECC key, produce a PGP/MIME message,
 decrypt it, and verify the original body.
 
