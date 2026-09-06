@@ -284,7 +284,10 @@
     "user_action_verification_period": "Benutzeraktionsverifizierungszeitraum (Tage)",
     "user_action_verification_service_url": "URL des Benutzeraktionsverifizierungsdienstes",
     "user_action_verification_url_param": "URL-Parameter für Benutzeraktionsverifizierung",
-    "user_action_verification_type": "Typ der Benutzeraktionsverifizierung"
+    "user_action_verification_type": "Typ der Benutzeraktionsverifizierung",
+    "titra_api_token": "titra API-Token",
+    "generate_api_token": "Ersatz erzeugen",
+    "api_token_write_only_help": "Vorhandene Token werden ausgeblendet. Lassen Sie dieses Feld leer, um das aktuelle Token beizubehalten, oder erzeugen Sie ein Ersatz-Token und kopieren Sie es, bevor Sie diese Seite verlassen."
   },
   "verification": {
     "overdue_title": "Aktion erforderlich - Überfällig",
@@ -487,7 +490,8 @@
     "user_inactive": "Dieser Benutzer wurde deaktiviert, der Benutzer muss aktiviert werden um fortzufahren.",
     "extensionAlreadyLaunched": "Die Erweiterung wurde bereits gestartet.",
     "no_entry_selected": "Es wurde kein Eintrag ausgewählt. Bitte wählen Sie zumindest einen Eintrag aus.",
-    "unknown_error": "Ein unbekannter Fehler ist aufgetreten."
+    "unknown_error": "Ein unbekannter Fehler ist aufgetreten.",
+    "timecard_migration_locked": "Time-entry changes are temporarily paused while an administrator migrates legacy dates. Please try again when the migration has finished."
   },
   "login": {
     "400": "Anmeldung fehlgeschlagen, bitte versuchen Sie es erneut.",
@@ -580,8 +584,18 @@
     "allowed_domains": "Erlaubte Domains",
     "allowed_domains_hint": "Kommagetrennte Liste der Domains, die Webhooks senden dürfen (z.B. api.stripe.com, webhook.example.com)",
     "webhook_process_data": "Webhook-Verarbeitungsskript",
-    "webhook_processdata_hint": "Dieses JavaScript wird ausgeführt, wenn ein Webhook empfangen wird. Das Skript hat Zugriff auf die Variablen 'webhookData' (Webhook-Payload) und 'senderDomain'. Geben Sie ein Objekt mit den Eigenschaften 'action' ('complete' oder 'revoke') und 'userId' zurück, um die Verifizierung zu verarbeiten, oder null, um den Webhook zu ignorieren.",
-    "confirm_delete": "Sind Sie sicher, dass Sie dieses Element löschen möchten?"
+    "webhook_processdata_hint": "Legacy-Skripte sind für sichere Webhook-Schnittstellen deaktiviert.",
+    "confirm_delete": "Sind Sie sicher, dass Sie dieses Element löschen möchten?",
+    "webhook_security_hint": "Webhook-Geheimnisse werden ausschließlich über die angezeigte Umgebungsvariable bereitgestellt. Sie werden hier weder eingegeben noch gespeichert. Neue und neu zugeordnete Schnittstellen bleiben bis zum Neustart mit einem gültigen Geheimnis inaktiv.",
+    "webhook_mapping_rules": "Deklarative Zuordnungsregeln (JSON)",
+    "webhook_mapping_rules_hint": "Verwenden Sie RFC-6901-Zeiger für Ereignis und Benutzer-ID. Jede Regel muss complete oder revoke auswählen; JavaScript ist nicht zulässig.",
+    "webhook_mapping_rules_invalid": "Zuordnungsregeln müssen ein gültiges JSON-Array sein.",
+    "webhook_endpoint": "Endpunkt-ID",
+    "webhook_readiness": "Sicherheitsbereitschaft",
+    "webhook_ready": "Bereit",
+    "webhook_not_ready": "Nicht bereit",
+    "webhook_legacy": "Legacy deaktiviert",
+    "webhook_referenced_users": "referenzierte Benutzer"
   },
   "timecard_migration": {
     "tab": "Date migration",

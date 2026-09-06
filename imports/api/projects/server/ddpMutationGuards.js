@@ -6,6 +6,22 @@ function projectAdministratorMutationSelector(projectId, userId) {
   return {
     _id: projectId,
     $or: [{ userId }, { admins: userId }],
+    lifecycleLock: { $exists: false },
+    taskGraphLock: { $exists: false },
+    $and: [
+      {
+        $or: [
+          { lifecycleWriters: { $exists: false } },
+          { lifecycleWriters: { $size: 0 } },
+        ],
+      },
+      {
+        $or: [
+          { lifecycleWriterMetadata: { $exists: false } },
+          { lifecycleWriterMetadata: { $size: 0 } },
+        ],
+      },
+    ],
   }
 }
 

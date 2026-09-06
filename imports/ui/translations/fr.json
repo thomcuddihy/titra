@@ -284,7 +284,10 @@
     "user_action_verification_type": "Type de vérification d'action utilisateur",
     "userInterface_settings": "Paramètres d'interface utilisateur",
     "custom_logo": "Logo personnalisé (URL ou URI de données)",
-    "enable_googleapi": "Activer l'intégration Google Workspace?"
+    "enable_googleapi": "Activer l'intégration Google Workspace?",
+    "titra_api_token": "Jeton API titra",
+    "generate_api_token": "Générer un remplacement",
+    "api_token_write_only_help": "Les jetons existants sont masqués. Laissez ce champ vide pour conserver le jeton actuel, ou générez-en un nouveau et copiez-le avant de quitter cette page."
   },
   "verification": {
     "overdue_title": "Action requise - En retard",
@@ -480,7 +483,8 @@
     "user_inactive": "Cet utilisateur a été désactivé, veuillez l'activer pour continuer.",
     "extensionAlreadyLaunched": "L'extension est déjà en cours d'exécution.",
     "no_entry_selected": "Aucune entrée sélectionnée. Veuillez sélectionner au moins une entrée pour continuer.",
-    "unknown_error": "Une erreur inconnue s'est produite. Veuillez réessayer."
+    "unknown_error": "Une erreur inconnue s'est produite. Veuillez réessayer.",
+    "timecard_migration_locked": "Time-entry changes are temporarily paused while an administrator migrates legacy dates. Please try again when the migration has finished."
   },
   "login": {
     "400": "Connexion échouée, veuillez réessayer.",
@@ -572,8 +576,18 @@
     "allowed_domains": "Domaines autorisés",
     "allowed_domains_hint": "Liste séparée par des virgules des domaines autorisés à envoyer des webhooks (ex: api.stripe.com, webhook.example.com)",
     "webhook_process_data": "Script de traitement webhook",
-    "webhook_processdata_hint": "Ce JavaScript sera exécuté chaque fois qu'un webhook est reçu. Le script a accès aux variables 'webhookData' (charge utile du webhook) et 'senderDomain'. Retournez un objet avec les propriétés 'action' ('complete' ou 'revoke') et 'userId' pour traiter la vérification, ou null pour ignorer le webhook.",
-    "confirm_delete": "Êtes-vous sûr de vouloir supprimer cet élément ?"
+    "webhook_processdata_hint": "Les scripts hérités sont désactivés pour les interfaces webhook sécurisées.",
+    "confirm_delete": "Êtes-vous sûr de vouloir supprimer cet élément ?",
+    "webhook_security_hint": "Les secrets webhook sont fournis uniquement par la variable d’environnement affichée. Ils ne sont jamais saisis ni stockés ici. Une interface nouvelle ou remappée reste inactive jusqu’au redémarrage avec un secret valide.",
+    "webhook_mapping_rules": "Règles de mappage déclaratives (JSON)",
+    "webhook_mapping_rules_hint": "Utilisez des pointeurs RFC 6901 pour l’événement et l’identifiant utilisateur. Chaque règle choisit complete ou revoke ; JavaScript n’est pas accepté.",
+    "webhook_mapping_rules_invalid": "Les règles doivent être un tableau JSON valide.",
+    "webhook_endpoint": "Identifiant du point de terminaison",
+    "webhook_readiness": "État de sécurité",
+    "webhook_ready": "Prêt",
+    "webhook_not_ready": "Non prêt",
+    "webhook_legacy": "Ancien format désactivé",
+    "webhook_referenced_users": "utilisateur(s) associé(s)"
   },
   "timecard_migration": {
     "tab": "Date migration",

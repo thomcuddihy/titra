@@ -131,12 +131,14 @@ function publicationContext(userId) {
 const users = new FakeCollection()
 const globalSettings = new FakeCollection()
 const transactions = new FakeCollection()
+const migrations = new FakeCollection()
 const webhookVerification = new FakeCollection()
 const publications = new Map()
 
 globalThis.__adminSensitiveUsers = users
 globalThis.__adminSensitiveGlobalSettings = globalSettings
 globalThis.__adminSensitiveTransactions = transactions
+globalThis.__adminSensitiveMigrations = migrations
 globalThis.__adminSensitiveWebhookVerification = webhookVerification
 globalThis.Meteor = {
   users,
@@ -185,6 +187,15 @@ const transactionPublicationModule = await loadPublication(
     ).href,
   },
 )
+await loadPublication('../api/timecarddatemigrations/server/publications.js', {
+  'meteor/check': checkModule,
+  'meteor/meteor': meteorModule,
+  '../../../utils/server_method_helpers.js': authenticationModule,
+  '../../../utils/adminCollectionPublication.js': helperModule,
+  '../timecarddatemigrations.js': dataModule(
+    'export const TimecardDateMigrationRuns = globalThis.__adminSensitiveMigrations',
+  ),
+})
 await loadPublication('../api/webhookverification/server/publications.js', {
   'meteor/meteor': meteorModule,
   '../webhookverification.js': dataModule(
@@ -266,15 +277,22 @@ test('sensitive admin collections use exact fields and retract all rows live', a
     args: '{"password":"unterminated-legacy-secret"',
     timestamp: new Date('2026-08-31T00:00:00.000Z'),
   })
+  migrations.replace({
+    _id: 'migration', status: 'prepared', createdAt: new Date('2026-09-01T00:00:00.000Z'),
+    backupDocuments: [{ secret: 'hidden' }],
+  })
   webhookVerification.replace({
-    _id: 'webhook', name: 'Webhook', active: true,
-    allowedDomains: 'example.test', processData: 'return true',
+    _id: 'webhook', name: 'Webhook', active: true, endpointId: 'endpoint',
     secret: 'hidden',
+  })
+  webhookVerification.replace({
+    _id: 'removed-webhook', name: 'Removed', removedAt: new Date(), secret: 'hidden',
   })
 
   const contexts = new Map()
   for (const [name, options] of [
     ['allTransactions', { limit: 25 }],
+    ['timecardDateMigrationRuns', { limit: 25 }],
     ['webhookverification', undefined],
   ]) {
     const context = publicationContext('admin')
@@ -305,12 +323,25 @@ test('sensitive admin collections use exact fields and retract all rows live', a
   assert.equal(publishedTransactions.includes('legacy@example.test'), false)
   assert.equal(publishedTransactions.includes('legacy-password-value'), false)
   assert.equal(publishedTransactions.includes('unterminated-legacy-secret'), false)
+  assert.deepEqual(
+    contexts.get('timecardDateMigrationRuns').documents.get(
+      'timecardDateMigrationRuns:migration',
+    ),
+    {
+      _id: 'migration', status: 'prepared',
+      createdAt: new Date('2026-09-01T00:00:00.000Z'),
+    },
+  )
   assert.deepEqual(contexts.get('webhookverification').documents.get(
     'webhookverification:webhook',
   ), {
     _id: 'webhook', name: 'Webhook', active: true,
-    allowedDomains: 'example.test', processData: 'return true',
+    endpointId: 'endpoint',
   })
+  assert.equal(
+    contexts.get('webhookverification').documents.has('webhookverification:removed-webhook'),
+    false,
+  )
 
   users.replace({ _id: 'admin', isAdmin: false })
   contexts.forEach((context) => assert.equal(context.documents.size, 0))
@@ -345,6 +376,7 @@ test('unauthorized admin collection subscriptions fail closed before observing d
   assert.equal(transactions.observers.size, transactionObserverCount)
 
   for (const [name, collection, options] of [
+    ['timecardDateMigrationRuns', migrations, {}],
     ['webhookverification', webhookVerification, undefined],
   ]) {
     const observerCount = collection.observers.size

@@ -36,7 +36,10 @@ test('all date-bearing timecard mutation paths participate in the migration lock
     'async function upsertTimecard(',
   )
   assert.match(insert, /await assertTimecardDateMigrationUnlocked\(\)/)
-  assert.match(insert, /withTimecardDateWriteLease\(\(\) => Timecards\.insertAsync/)
+  assert.match(
+    insert,
+    /withTimecardDateWriteLease\(async \(\) => createProjectChildWithFence\([^]*Timecards\.insertAsync/,
+  )
 
   const weekUpsert = sourceBetween(
     timecardMethodsSource,

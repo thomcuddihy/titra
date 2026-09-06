@@ -12,6 +12,22 @@ test('project mutation selectors re-check caller administration in the atomic wr
   assert.deepEqual(projectAdministratorMutationSelector('project', 'caller'), {
     _id: 'project',
     $or: [{ userId: 'caller' }, { admins: 'caller' }],
+    lifecycleLock: { $exists: false },
+    taskGraphLock: { $exists: false },
+    $and: [
+      {
+        $or: [
+          { lifecycleWriters: { $exists: false } },
+          { lifecycleWriters: { $size: 0 } },
+        ],
+      },
+      {
+        $or: [
+          { lifecycleWriterMetadata: { $exists: false } },
+          { lifecycleWriterMetadata: { $size: 0 } },
+        ],
+      },
+    ],
   })
   assert.throws(() => projectAdministratorMutationSelector('', 'caller'), TypeError)
   assert.equal(projectMutationMatched({ matchedCount: 1, modifiedCount: 0 }), true)

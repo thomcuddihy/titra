@@ -21,7 +21,11 @@ function canRegisterTime(project, userId) {
 async function runAuthorizedTimecardCreateRule({
   projectId, userId, ruleInput,
 }, { findProject, checkRule }) {
-  const project = await findProject({ _id: projectId })
+  const project = await findProject({
+    _id: projectId,
+    lifecycleLock: { $exists: false },
+    taskGraphLock: { $exists: false },
+  })
   if (!canRegisterTime(project, userId)) throw new TimecardCreateAuthorizationError()
   await checkRule(ruleInput)
   return project

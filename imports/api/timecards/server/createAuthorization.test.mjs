@@ -28,7 +28,9 @@ test('owner, administrator, member, and public caller reach the rule only after 
       projectId: 'p1', userId, ruleInput: { projectId: 'p1' },
     }, {
       findProject: async (selector) => {
-        assert.deepEqual(selector, { _id: 'p1' })
+        assert.deepEqual(selector, {
+          _id: 'p1', lifecycleLock: { $exists: false }, taskGraphLock: { $exists: false },
+        })
         return { _id: 'p1', ...project }
       },
       checkRule: async () => { ruleCalls += 1 },

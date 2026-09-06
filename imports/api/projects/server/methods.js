@@ -11,6 +11,12 @@ import { emojify } from '../../../utils/frontend_helpers'
 import { periodToDates } from '../../../utils/periodHelpers.js'
 import { authenticationMixin, transactionLogMixin, calculateSimilarity } from '../../../utils/server_method_helpers'
 import {
+  definiteProjectChildNoWrite,
+  deleteEmptyProjectWithFence,
+  runWithProjectChildWriter,
+} from './projectChildFence.js'
+import { projectSnapshotSelector } from './projectLifecycle.js'
+import {
   publicNameOnlyUser,
   userSelectorForProjectAudience,
 } from '../../users/server/projectUserPrivacy.js'
@@ -59,7 +65,8 @@ function rethrowProjectPresentationValidation(error) {
 }
 
 const forbiddenProjectMutationFields = new Set([
-  '_id', 'userId', 'team', 'admins', 'rates', 'archived',
+  '_id', 'userId', 'team', 'admins', 'rates', 'projectRevision',
+  'lifecycleLock', 'lifecycleWriters', 'archived',
 ])
 
 function validProjectMutationField(name) {
@@ -84,7 +91,24 @@ async function assertProjectVisible(projectId, userId) {
 }
 
 function projectMutationModifier(modifier = {}) {
-  return modifier
+  return { ...modifier, $inc: { ...(modifier.$inc || {}), projectRevision: 1 } }
+}
+
+async function deleteEmptyProjectForLifecycle(selector, lockId = `delete:${Random.id()}`) {
+  return deleteEmptyProjectWithFence({ selector, lockId }, {
+    findOneAndUpdate: (...args) => Projects.rawCollection().findOneAndUpdate(...args),
+    countTimecards: (projectId) => Timecards.find({ projectId }).countAsync(),
+    countProjectTasks: (projectId) => Tasks.find({ projectId }).countAsync(),
+    deleteOne: (deleteSelector) => Projects.rawCollection().deleteOne(deleteSelector),
+    updateOne: (updateSelector, modifier) => Projects.rawCollection()
+      .updateOne(updateSelector, modifier),
+  })
+}
+
+const projectChildWriterDependencies = {
+  findOneAndUpdate: (...args) => Projects.rawCollection().findOneAndUpdate(...args),
+  findOne: (selector) => Projects.findOneAsync(selector),
+  updateOne: (selector, modifier) => Projects.rawCollection().updateOne(selector, modifier),
 }
 
 function aggregateTimecards(pipeline, options) {
@@ -274,6 +298,7 @@ const updateProject = new ValidatedMethod({
     await Projects.updateAsync({
       $or: [{ userId: this.userId }, { admins: { $in: [this.userId] } }],
       _id: projectId,
+      lifecycleLock: { $exists: false },
     }, projectMutationModifier({ $set: updateJSON }))
   },
 })
@@ -332,6 +357,7 @@ const createProject = new ValidatedMethod({
     }
     updateJSON._id = Random.id()
     updateJSON.userId = this.userId
+    updateJSON.projectRevision = 0
     await Projects.insertAsync(updateJSON)
     return updateJSON._id
   },
@@ -353,10 +379,13 @@ const deleteProject = new ValidatedMethod({
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({ projectId }) {
-    await Projects.removeAsync({
-      _id: projectId,
-      $or: [{ userId: this.userId }, { admins: { $in: [this.userId] } }],
-    })
+    const project = await Projects.findOneAsync({ _id: projectId, userId: this.userId })
+    if (!project) throw new Meteor.Error('not-authorized')
+    const result = await deleteEmptyProjectForLifecycle(projectSnapshotSelector(project))
+    if (result.status === 'not-empty') {
+      throw new Meteor.Error('project-not-empty', 'Only empty projects can be deleted; archive it instead.')
+    }
+    if (result.status !== 'deleted') throw new Meteor.Error('project-write-conflict')
     return true
   },
 })
@@ -381,6 +410,7 @@ const archiveProject = new ValidatedMethod({
       {
         _id: projectId,
         $or: [{ userId: this.userId }, { admins: { $in: [this.userId] } }],
+        lifecycleLock: { $exists: false },
       },
       projectMutationModifier({ $set: { archived: true } }),
     )
@@ -408,6 +438,7 @@ const restoreProject = new ValidatedMethod({
       {
         _id: projectId,
         $or: [{ userId: this.userId }, { admins: { $in: [this.userId] } }],
+        lifecycleLock: { $exists: false },
       },
       projectMutationModifier({ $set: { archived: false } }),
     )
@@ -650,6 +681,7 @@ const updatePriority = new ValidatedMethod({
       {
         _id: projectId,
         $or: [{ userId: this.userId }, { admins: { $in: [this.userId] } }],
+        lifecycleLock: { $exists: false },
       },
       projectMutationModifier({ $set: { priority } }),
     )
@@ -678,25 +710,48 @@ const setDefaultTaskForProject = new ValidatedMethod({
     const project = await Projects.findOneAsync({
       _id: projectId,
       $or: [{ userId: this.userId }, { admins: { $in: [this.userId] } }],
+      lifecycleLock: { $exists: false },
     })
     if (!project) {
       throw new Meteor.Error('notifications.project_not_found')
     }
-    const task = await Tasks.findOneAsync({ _id: taskId, projectId })
-    if (!task) throw new Meteor.Error('notifications.task_not_found')
-    if (task.isDefaultTask) {
-      await Projects.updateAsync({ _id: projectId }, { $unset: { defaultTask: 1 } })
-      await Tasks.updateAsync({ _id: taskId, projectId }, { $set: { isDefaultTask: false } })
-      return 'notifications.default_task_success'
-    }
-    await Projects.updateAsync({ _id: projectId }, { $set: { defaultTask: task.name } })
-    await Tasks.updateAsync(
-      { projectId, isDefaultTask: true, _id: { $ne: taskId } },
-      { $set: { isDefaultTask: false } },
-      { multi: true },
-    )
-    await Tasks.updateAsync({ _id: taskId, projectId }, { $set: { isDefaultTask: true } })
-    return 'notifications.default_task_success'
+    return runWithProjectChildWriter({
+      selector: {
+        _id: projectId,
+        $or: [{ userId: this.userId }, { admins: { $in: [this.userId] } }],
+      },
+      projectId,
+      reservationId: `task-default:${taskId}:${Random.id()}`,
+      kind: 'project-default-task',
+      resourceId: taskId,
+      operation: async () => {
+        const task = await Tasks.findOneAsync({ _id: taskId, projectId })
+        if (!task) {
+          throw definiteProjectChildNoWrite(
+            new Meteor.Error('notifications.task_not_found'),
+          )
+        }
+        if (task.isDefaultTask) {
+          await Projects.updateAsync({
+            _id: projectId, lifecycleLock: { $exists: false },
+          }, projectMutationModifier({ $unset: { defaultTask: 1 } }))
+          await Tasks.updateAsync({ _id: taskId, projectId }, {
+            $set: { isDefaultTask: false }, $inc: { projectTaskRevision: 1 },
+          })
+          return 'notifications.default_task_success'
+        }
+        await Projects.updateAsync({
+          _id: projectId, lifecycleLock: { $exists: false },
+        }, projectMutationModifier({ $set: { defaultTask: task.name } }))
+        await Tasks.updateAsync({ projectId, isDefaultTask: true, _id: { $ne: taskId } }, {
+          $set: { isDefaultTask: false }, $inc: { projectTaskRevision: 1 },
+        }, { multi: true })
+        await Tasks.updateAsync({ _id: taskId, projectId }, {
+          $set: { isDefaultTask: true }, $inc: { projectTaskRevision: 1 },
+        })
+        return 'notifications.default_task_success'
+      },
+    }, projectChildWriterDependencies)
   },
 })
 
@@ -775,6 +830,7 @@ const searchForProject = new ValidatedMethod({
 })
 
 export {
+  deleteEmptyProjectForLifecycle,
   getAllProjectStats,
   getProjectUsers,
   createProject,

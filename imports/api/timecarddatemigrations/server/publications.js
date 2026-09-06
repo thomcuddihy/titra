@@ -1,6 +1,7 @@
 import { check, Match } from 'meteor/check'
 import { Meteor } from 'meteor/meteor'
 import { checkAdminAuthentication } from '../../../utils/server_method_helpers.js'
+import { publishAdminCollection } from '../../../utils/adminCollectionPublication.js'
 import { TimecardDateMigrationRuns } from '../timecarddatemigrations.js'
 
 const TIMECARD_DATE_MIGRATION_ADMIN_FIELDS = Object.freeze({
@@ -49,16 +50,13 @@ Meteor.publish('timecardDateMigrationRuns', async function timecardDateMigration
   const limit = Number.isInteger(options.limit)
     ? Math.min(Math.max(options.limit, 1), 100)
     : 25
-  return TimecardDateMigrationRuns.find(
-    {},
-    {
-      fields: TIMECARD_DATE_MIGRATION_ADMIN_FIELDS,
-      sort: { createdAt: -1 },
-      limit,
-    },
-  )
+  return publishAdminCollection(this, {
+    users: Meteor.users,
+    collection: TimecardDateMigrationRuns,
+    collectionName: 'timecardDateMigrationRuns',
+    fields: TIMECARD_DATE_MIGRATION_ADMIN_FIELDS,
+    cursorOptions: { sort: { createdAt: -1 }, limit },
+  })
 })
 
-// Kept named so focused publication tests can verify the intentionally narrow projection.
-// eslint-disable-next-line import/prefer-default-export
 export { TIMECARD_DATE_MIGRATION_ADMIN_FIELDS }
