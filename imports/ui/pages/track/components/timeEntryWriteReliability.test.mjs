@@ -47,4 +47,3 @@ test('failed week writes remain dirty and later edits survive success', () => {
   assert.match(weektable, /\.js-hours\[data-dirty="true"\]/)
   assert.match(weektable, /if \(!hasPendingEdits\)/)
 })
-
