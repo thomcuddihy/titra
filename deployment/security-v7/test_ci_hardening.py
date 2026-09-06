@@ -201,10 +201,12 @@ class DevcontainerHardeningTests(unittest.TestCase):
             image,
             r"^geoffreybooth/meteor-base:3\.5\.1@sha256:[0-9a-f]{64}$",
         )
+        expected_digest = (
+            "1685815bf3d7be5f51052401119f9885ae2c8d6dcc2d1cf6b3235b1b764c9599"
+        )
         self.assertEqual(
             image,
-            "geoffreybooth/meteor-base:3.5.1@"
-            "sha256:1685815bf3d7be5f51052401119f9885ae2c8d6dcc2d1cf6b3235b1b764c9599",
+            f"geoffreybooth/meteor-base:3.5.1@sha256:{expected_digest}",
         )
         post_create = config["postCreateCommand"]
         self.assertEqual(post_create, "meteor npm ci --no-audit --no-fund")
