@@ -41,6 +41,8 @@ const SIGNED_IN_USER_FIELDS = Object.freeze({
   'profile.customStartDate': 1,
   'profile.customEndDate': 1,
   'profile.timer': 1,
+  'profile.timerId': 1,
+  'profile.timerRevision': 1,
   'profile.timer_project': 1,
   'profile.timer_task': 1,
   'profile.timer_custom_fields': 1,

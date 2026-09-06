@@ -3,8 +3,11 @@ const PUBLIC_TIMECARD_FIELDS = Object.freeze({
   userId: 1,
   projectId: 1,
   date: 1,
+  dateOnly: 1,
+  startTime: 1,
   hours: 1,
   task: 1,
+  dateRevision: 1,
 })
 
 const MEMBER_TIMECARD_FIELDS = Object.freeze({

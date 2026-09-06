@@ -7,6 +7,7 @@ const PUBLIC_PROJECT_TASK_FIELDS = Object.freeze({
   estimatedHours: 1,
   dependencies: 1,
   isDefaultTask: 1,
+  projectTaskRevision: 1,
 })
 
 const PERSONAL_SUGGESTION_FIELDS = Object.freeze({
@@ -14,6 +15,7 @@ const PERSONAL_SUGGESTION_FIELDS = Object.freeze({
   userId: 1,
   name: 1,
   lastUsed: 1,
+  taskSuggestionRevision: 1,
 })
 
 function isProjectMember(project, userId) {

@@ -22,7 +22,7 @@ test('public DDP project projection matches the least-disclosure contract', () =
   for (const hidden of [
     'userId', 'team', 'admins', 'customer', 'budget', 'target', 'rate', 'rates',
     'defaultTask', 'priority', 'selectedWekanList', 'selectedWekanSwimlanes',
-    'wekanurl', 'gitlabquery', 'secret',
+    'wekanurl', 'gitlabquery', 'projectRevision', 'secret',
   ]) assert.equal(fields[hidden], undefined)
 })
 
@@ -31,12 +31,12 @@ test('public serialization strips secrets and a membership downgrade removes pri
     _id: 'p1', userId: 'owner', team: ['caller'], public: true,
     name: 'Visible', color: '#abcdef', customer: 'Secret customer', rate: 400,
     rates: { caller: 500 }, wekanurl: 'https://example/?authToken=secret',
-    gitlabquery: 'private query', cost_code: 'ABC', futureInternalField: 'hidden',
+    gitlabquery: 'private query', cost_code: 'ABC', lifecycleLock: { lockId: 'hidden' },
   }
   const member = projectFieldsForCaller(memberProject, 'caller', ['cost_code'])
   assert.equal(member.wekanurl, undefined)
   assert.equal(member.cost_code, 'ABC')
-  assert.equal(member.futureInternalField, undefined)
+  assert.equal(member.lifecycleLock, undefined)
 
   const publicOnly = projectFieldsForCaller({ ...memberProject, team: [] }, 'caller', ['cost_code'])
   assert.deepEqual(publicOnly, { name: 'Visible', color: '#abcdef', public: true })
@@ -55,11 +55,13 @@ test('member projection retains fields used by existing clients and safe configu
   for (const required of [
     'userId', 'team', 'admins', 'customer', 'target', 'rate', 'rates',
     'defaultTask', 'selectedWekanList', 'selectedWekanSwimlanes',
-    'gitlabquery', 'cost_code',
+    'gitlabquery', 'projectRevision', 'cost_code',
   ]) assert.equal(fields[required], 1)
   assert.equal(fields.wekanurl, undefined)
   assert.equal(fields['nested.value'], undefined)
   assert.equal(fields.$private, undefined)
+  assert.equal(fields.lifecycleLock, undefined)
+  assert.equal(fields.lifecycleWriters, undefined)
 })
 
 test('member and public selectors are deliberately disjoint', () => {

@@ -26,6 +26,7 @@ const MEMBER_PROJECT_FIELDS = Object.freeze({
   selectedWekanList: 1,
   selectedWekanSwimlanes: 1,
   gitlabquery: 1,
+  projectRevision: 1,
 })
 
 function projectMembershipSelector(userId) {

@@ -39,6 +39,8 @@ const EXPECTED_UI_FIELDS = [
   'profile.theme',
   'profile.timeunit',
   'profile.timer',
+  'profile.timerId',
+  'profile.timerRevision',
   'profile.timer_custom_fields',
   'profile.timer_project',
   'profile.timer_start_time',

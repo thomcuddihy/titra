@@ -15,10 +15,10 @@ import { createPublicationReconciler } from '../../../utils/reactivePublication.
 test('public project tasks and personal suggestions have explicit allowlists', () => {
   assert.deepEqual(Object.keys(PUBLIC_PROJECT_TASK_FIELDS).sort(), [
     '_id', 'dependencies', 'end', 'estimatedHours', 'isDefaultTask', 'name',
-    'projectId', 'start',
+    'projectId', 'projectTaskRevision', 'start',
   ])
   assert.deepEqual(Object.keys(PERSONAL_SUGGESTION_FIELDS).sort(), [
-    '_id', 'lastUsed', 'name', 'userId',
+    '_id', 'lastUsed', 'name', 'taskSuggestionRevision', 'userId',
   ])
 })
 

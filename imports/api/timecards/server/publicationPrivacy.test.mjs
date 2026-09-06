@@ -29,7 +29,8 @@ function recordPublication(collectionName) {
 
 test('public timecard projection is an exact least-disclosure allowlist', () => {
   assert.deepEqual(Object.keys(PUBLIC_TIMECARD_FIELDS).sort(), [
-    '_id', 'date', 'hours', 'projectId', 'task', 'userId',
+    '_id', 'date', 'dateOnly', 'dateRevision', 'hours', 'projectId',
+    'startTime', 'task', 'userId',
   ])
   assert.equal(timecardFields({ member: false }).taskRate, undefined)
   assert.equal(timecardFields({ member: false }).state, undefined)
