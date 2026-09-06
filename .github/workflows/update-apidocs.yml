@@ -1,53 +1,93 @@
-# .github/workflows/update-apidocs.yml
+name: Generate and deploy API documentation
 
-name: Generate and Deploy API Docs
-
-# Controls when the action will run.
-# This workflow runs on every push to the 'main' branch.
 on:
   push:
     branches:
-      - master # Change this to your default branch (e.g., master)
-permissions:
-  contents: write
-  pages: write
-  id-token: write
-# A workflow run is made up of one or more jobs that can run sequentially or in parallel
+      - master
+
+permissions: {}
+
+concurrency:
+  group: titra-api-documentation
+  cancel-in-progress: false
+
 jobs:
-  build-and-deploy:
-    # The type of runner that the job will run on
-    runs-on: ubuntu-latest
-
-    # Steps represent a sequence of tasks that will be executed as part of the job
+  build:
+    name: Test and build documentation
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
-      - name: Free disk space
-        run: curl -fsSL https://raw.githubusercontent.com/kou/arrow/e49d8ae15583ceff03237571569099a6ad62be32/ci/scripts/util_free_space.sh | bash
-
-      # 1. Checks out your repository under $GITHUB_WORKSPACE, so your job can access it
-      - name: Checkout repository
-        uses: actions/checkout@v5
-
-      # 2. Sets up Node.js in the runner
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
+      - name: Checkout source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          node-version: '20' # Specify the Node.js version you use
+          persist-credentials: false
 
-      # 3. Installs the apidoc CLI tool globally
-      - name: Install apidoc
-        run: npm install -g apidoc
-
-      # 4. Runs the apidoc command to generate documentation
-      #    -i: input directory (where your documented source code is)
-      #    -o: output directory (where the docs will be generated)
-      - name: Generate API Docs
-        run: mkdir ./apidoc && apidoc -i server/ -o ./apidoc/
-
-      # 5. Deploys the generated documentation to the gh-pages branch
-      - name: Deploy to GitHub Pages
-        uses: peaceiris/actions-gh-pages@v4
+      - name: Set up Node.js 24.20.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          # This token is provided by Actions, you do not need to create your own secret
+          node-version: "24.20.0"
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Run tests before publishing documentation
+        run: npm test
+
+      - name: Generate API documentation with verified apiDoc
+        env:
+          APIDOC_SPEC: apidoc@1.2.0
+          APIDOC_INTEGRITY: sha512-Qagoj7QnqNHbDUDNpU21eLP4hJSAXn6knHtEjRYWTlSEmpYDGSQijejyFXaWGByhfryW8B1gL+6B57UB/F1lxw==
+          NPM_CONFIG_IGNORE_SCRIPTS: "true"
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          apidoc_archive="${RUNNER_TEMP}/apidoc-1.2.0.tgz"
+          npm pack "$APIDOC_SPEC" --pack-destination "$RUNNER_TEMP" --silent
+          node - "$apidoc_archive" "$APIDOC_INTEGRITY" <<'NODE'
+          const crypto = require('node:crypto');
+          const fs = require('node:fs');
+          const [archive, expected] = process.argv.slice(2);
+          const actual = `sha512-${crypto.createHash('sha512')
+            .update(fs.readFileSync(archive)).digest('base64')}`;
+          if (actual !== expected) {
+            throw new Error('apiDoc package integrity did not match the reviewed value');
+          }
+          NODE
+          mkdir -p apidoc
+          npm exec --yes --package="$apidoc_archive" -- \
+            apidoc -i server/ -o apidoc/
+
+      - name: Upload generated documentation
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: apidoc-site
+          path: apidoc
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    name: Deploy documentation to GitHub Pages
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository without persisting credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download generated documentation
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: apidoc-site
+          path: apidoc
+
+      - name: Publish the generated files to the existing gh-pages branch
+        uses: peaceiris/actions-gh-pages@84c30a85c19949d7eee79c4ff27748b70285e453 # v4.1.0
+        with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          # The directory where your generated documentation is located
-          publish_dir: ./apidoc
+          publish_branch: gh-pages
+          publish_dir: apidoc

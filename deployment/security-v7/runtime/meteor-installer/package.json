@@ -1,0 +1,27 @@
+{
+  "name": "meteor",
+  "version": "3.5.1",
+  "private": true,
+  "description": "Integrity-locked Meteor installer used only by the Titra image builder",
+  "main": "install.js",
+  "type": "commonjs",
+  "dependencies": {
+    "7zip-bin": "^5.2.0",
+    "cli-progress": "^3.11.1",
+    "https-proxy-agent": "^5.0.1",
+    "node-7z": "^2.1.2",
+    "node-downloader-helper": "^2.1.9",
+    "rimraf": "^6.0.1",
+    "semver": "^7.3.7",
+    "tar": "7.5.22",
+    "tmp": "0.2.7"
+  },
+  "overrides": {
+    "tar": "7.5.22",
+    "tmp": "0.2.7"
+  },
+  "engines": {
+    "node": ">=20.x",
+    "npm": ">=10.x"
+  }
+}

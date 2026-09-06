@@ -3,8 +3,44 @@ node_modules/
 .vscode/
 jsconfig.json
 
+# Local branch-splitting worktrees and test coverage
+/.worktrees/
+.coverage
+.coverage.*
+**/.coverage.*
+**/__pycache__/
+**/*.py[cod]
+**/.mypy_cache/
+**/.pytest_cache/
+**/.ruff_cache/
+**/*.egg-info/
+
 # Meteor Modern-Tools build context directories
 _build
 */build-assets
 */build-chunks
 .rsdoctor
+
+# Local deployment credentials and webhook signing secrets
+.env
+.env.*
+!.env.example
+titra-*-secrets.env
+secrets/
+credentials/
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+
+# Generated deployment bundles, container archives, logs, and receipts
+/deployment/dist-*/
+/deployment/test-artifacts/
+/deployment/verification-*/
+/deployment/remote-test-*/.e2e/
+/deployment/remote-test-*/images/
+/deployment/**/*.tar
+/deployment/**/*.tar.gz
+/local-tools/titra-cli/build/
+/local-tools/titra-cli/dist/

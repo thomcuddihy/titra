@@ -1,4 +1,6 @@
-version: '3'
+# Deprecated for production: Watchtower follows mutable tags and holds the
+# Docker socket. Use a digest-pinned image and a controlled upgrade instead.
+# This file remains only for backward-compatible local setups.
 services:
   titra:
     image: titraio/titra
@@ -15,15 +17,17 @@ services:
       - "com.centurylinklabs.watchtower.enable=true"
     restart: always
   mongodb:
-    image: mongo:7.0
+    image: mongo:7.0.40
     container_name: titra_db
     restart: always
     environment:
-      - MONGO_DB:titra
+      - MONGO_INITDB_DATABASE=titra
     volumes:
       - titra_db_volume:/data/db
   watchtower:
     image: nickfedor/watchtower
+    profiles:
+      - unsafe-auto-update
     container_name: watchtower
     restart: always
     command: --cleanup --schedule "0 0 0 * * *" --label-enable

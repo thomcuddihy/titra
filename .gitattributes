@@ -1,0 +1,7 @@
+*.sh text eol=lf
+*.sh.in text eol=lf
+Dockerfile text eol=lf
+.meteor/release text eol=lf
+*.tar binary
+*.gz binary
+*.whl binary
