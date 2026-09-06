@@ -21,6 +21,11 @@ import {
 import { projectResources } from '../../../../api/users/users.js'
 import Projects from '../../../../api/projects/projects'
 import { buildDetailedTimeEntriesForPeriodSelectorAsync } from '../../../../utils/server_method_helpers'
+import {
+  getTimecardDateOnly,
+  getTimecardEndTime,
+  getTimecardStartTime,
+} from '../../../../utils/timecardDate.js'
 import './detailtimetable.html'
 import './pagination.js'
 import './limitpicker.js'
@@ -34,15 +39,16 @@ const customFieldType = 'name'
 
 function detailedDataTableMapper(entry, forExport) {
   const project = Projects.findOne({ _id: entry.projectId })
+  const dateOnly = getTimecardDateOnly(entry)
   let mapping = [entry.projectId,
-    dayjs.utc(entry.date).format(getGlobalSetting('dateformat')),
+    dayjs.utc(dateOnly, 'YYYY-MM-DD').format(getGlobalSetting('dateformat')),
     entry.task.replace(/^=/, '\\=')]
   if (getGlobalSetting('showResourceInDetails')) {
     mapping.push(entry.userId)
   }
   if (forExport) {
     mapping = [project?.name ? project.name : '',
-      dayjs.utc(entry.date).format(getGlobalSetting('dateformat')),
+      dayjs.utc(dateOnly, 'YYYY-MM-DD').format(getGlobalSetting('dateformat')),
       entry.task.replace(/^=/, '\\=')]
     if (getGlobalSetting('showResourceInDetails')) {
       mapping.push(projectResources.findOne() ? projectResources.findOne({ _id: entry.userId })?.name : '')
@@ -67,8 +73,8 @@ function detailedDataTableMapper(entry, forExport) {
     mapping.push(entry.state)
   }
   if (getGlobalSetting('useStartTime')) {
-    mapping.push(dayjs.utc(entry.date).local().format('HH:mm')) // Ensure consistent timezone usage
-    mapping.push(dayjs.utc(entry.date).local().add(entry.hours, 'hour').format('HH:mm')) // Ensure consistent timezone usage
+    mapping.push(getTimecardStartTime(entry))
+    mapping.push(getTimecardEndTime(entry))
   }
   mapping.push(Number(timeInUserUnit(entry.hours)))
   if (getGlobalSetting('showRateInDetails')) {

@@ -39,6 +39,9 @@ titra is available in the [DigitalOcean Marketplace](https://marketplace.digital
 ## 📚 Documentation and more
 Checkout our [wiki](https://wiki.titra.io) for best practices and to learn how to setup interfaces with external tools like Wekan.
 
+Contributors working with time-entry dates should also see the
+[time-entry date storage contract](docs/timecard-date-storage.md).
+
 
 
 Built with ❤️ in 🇦🇹

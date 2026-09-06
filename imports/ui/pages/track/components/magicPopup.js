@@ -1,6 +1,7 @@
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra'
 import dayjs from 'dayjs'
 import isoWeek from 'dayjs/plugin/isoWeek'
+import utc from 'dayjs/plugin/utc'
 import { Popover } from 'bootstrap'
 import './magicPopup.html'
 import './projectsearch.js'
@@ -8,28 +9,35 @@ import { t } from '../../../../utils/i18n.js'
 import { googleAPI } from '../../../../utils/google/google_client.js'
 import { getUserSetting, showToast } from '../../../../utils/frontend_helpers'
 import Projects from '../../../../api/projects/projects'
+import {
+  dateOnlyFromLocalDate,
+  dateOnlyToUTCDate,
+  isDateOnly,
+} from '../../../../utils/timecardDate.js'
 
 Template.magicPopup.onCreated(function magicPopupCreated() {
   this.magicData = new ReactiveVar([])
   this.showPopup = new ReactiveVar(false)
   dayjs.extend(isoWeek)
+  dayjs.extend(utc)
   this.subscribe('myProjects')
 })
 const getMagicData = (templateInstance) => {
-  let startDate = FlowRouter.getQueryParam('date') ? dayjs.utc(FlowRouter.getQueryParam('date'), 'YYYY-MM-DD').toDate() : dayjs.utc().startOf('day').toDate()
-  let endDate = dayjs.utc(startDate).add(1, 'day').toDate()
+  const queryDate = FlowRouter.getQueryParam('date')
+  const referenceDate = dayjs.utc(
+    isDateOnly(queryDate) ? queryDate : dateOnlyFromLocalDate(new Date()),
+    'YYYY-MM-DD',
+  )
+  let startDate = referenceDate.toDate()
+  let endDate = referenceDate.add(1, 'day').toDate()
   if (FlowRouter.getQueryParam('view') === 'w') {
-    startDate = FlowRouter.getQueryParam('date') ? dayjs.utc(FlowRouter.getQueryParam('date'), 'YYYY-MM-DD').startOf('day').isoWeekday(getUserSetting('startOfWeek')).toDate() : dayjs.utc().startOf('day').isoWeekday(getUserSetting('startOfWeek')).toDate()
-    endDate = FlowRouter.getQueryParam('date')
-      ? dayjs.utc(FlowRouter.getQueryParam('date'), 'YYYY-MM-DD').add(6, 'day').toDate()
-      : dayjs.utc().endOf('day').isoWeekday(getUserSetting('startOfWeek')).add(6, 'day')
-        .toDate()
+    const weekStart = referenceDate.startOf('day').isoWeekday(getUserSetting('startOfWeek'))
+    startDate = weekStart.toDate()
+    endDate = weekStart.endOf('day').add(6, 'day').toDate()
   }
   if (FlowRouter.getQueryParam('view') === 'm') {
-    startDate = FlowRouter.getQueryParam('date') ? dayjs.utc(FlowRouter.getQueryParam('date'), 'YYYY-MM-DD').startOf('month').toDate() : dayjs.utc().startOf('month').toDate()
-    endDate = FlowRouter.getQueryParam('date')
-      ? dayjs.utc(FlowRouter.getQueryParam('date'), 'YYYY-MM-DD').endOf('month').toDate()
-      : dayjs.utc().endOf('month').toDate()
+    startDate = referenceDate.startOf('month').toDate()
+    endDate = referenceDate.endOf('month').toDate()
   }
   templateInstance.magicData.set([])
   googleAPI().then(() => {
@@ -108,7 +116,7 @@ Template.magicPopup.events({
         $(element).find('.js-magic-project').removeClass('is-invalid')
         $(element).find('.js-magic-task').removeClass('is-invalid')
         $(element).find('.js-magic-hours').removeClass('is-invalid')
-        if (!date) {
+        if (!isDateOnly(date)) {
           $(element).find('.js-magic-date').addClass('is-invalid')
           selectedEntries = []
           return false
@@ -134,14 +142,19 @@ Template.magicPopup.events({
         if (getUserSetting('timeunit') === 'm') {
           hours /= 60
         }
-        selectedEntries.push(
-          {
-            date: new Date(Date.parse(date)),
+        const existingEntry = selectedEntries.find((entry) => entry.projectId === projectId
+          && entry.task === task && entry.dateOnly === date)
+        if (existingEntry) {
+          existingEntry.hours += hours
+        } else {
+          selectedEntries.push({
+            date: dateOnlyToUTCDate(date),
+            dateOnly: date,
             projectId,
             task,
             hours,
-          },
-        )
+          })
+        }
       }
       return true
     })

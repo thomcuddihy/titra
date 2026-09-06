@@ -435,6 +435,7 @@
     "siwapp_configuration": "You have to configure the Siwapp integration to use this feature.",
     "time_entry_deleted": "Time entry deleted",
     "time_entry_updated": "Time entry updated",
+    "week_aggregate_edit_conflict": "This week cell combines multiple time entries and cannot be edited as one. Edit the entries individually in Day or Details view.",
     "time_entry_saved": "Time entry saved",
     "delete_confirm": "Deletion cannot be undone, do you want to proceed?",
     "project_update_success": "Project updated",

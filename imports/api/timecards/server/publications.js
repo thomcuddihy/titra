@@ -2,6 +2,7 @@ import { Match } from 'meteor/check'
 import Timecards from '../timecards.js'
 import Projects from '../../projects/projects.js'
 import { checkAuthentication, buildDetailedTimeEntriesForPeriodSelectorAsync } from '../../../utils/server_method_helpers.js'
+import { dateOnlyRange, isDateOnly } from '../../../utils/timecardDate.js'
 
 /**
    * Publishes the project list based on the provided period.
@@ -48,10 +49,10 @@ Meteor.publish('periodTimecards', async function periodTimecards({ startDate, en
 Meteor.publish('myTimecardsForDate', async function myTimecardsForDate({ date }) {
   check(date, String)
   await checkAuthentication(this)
-  const startDate = new Date(date)
-  const endDate = new Date(date)
-  startDate.setHours(0)
-  endDate.setHours(23, 59)
+  if (!isDateOnly(date)) {
+    throw new Meteor.Error('invalid-date', 'The date must use YYYY-MM-DD format.')
+  }
+  const { startDate, endDate } = dateOnlyRange(date)
   return Timecards.find({
     userId: this.userId,
     date: { $gte: startDate, $lte: endDate },

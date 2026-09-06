@@ -11,6 +11,11 @@ import {
   getWeekDays, timeInUserUnit, getGlobalSetting, getUserSetting, showToast,
 } from '../../../../utils/frontend_helpers'
 import { checkHoliday, getHolidays } from '../../../../utils/holiday'
+import {
+  dateOnlyFromLocalDate,
+  dateOnlyToUTCDate,
+  getTimecardDateOnly,
+} from '../../../../utils/timecardDate.js'
 
 function isHoliday(date) {
   const templateInstance = Template.instance()
@@ -34,8 +39,9 @@ Template.weektable.onCreated(function weekTableCreated() {
   this.totalForWeekPerDay = new ReactiveVar([])
   this.autorun(() => {
     if (this.subscriptionsReady()) {
-      this.startDate.set(dayjs.utc().startOf('day').isoWeekday(getUserSetting('startOfWeek'))) // Ensure consistent timezone usage
-      this.endDate.set(dayjs.utc().endOf('day').isoWeekday(getUserSetting('startOfWeek')).add(6, 'day')) // Ensure consistent timezone usage
+      const today = dayjs.utc(dateOnlyFromLocalDate(new Date()), 'YYYY-MM-DD')
+      this.startDate.set(today.startOf('day').isoWeekday(getUserSetting('startOfWeek')))
+      this.endDate.set(today.endOf('day').isoWeekday(getUserSetting('startOfWeek')).add(6, 'day'))
     }
   })
   this.autorun(() => {
@@ -93,7 +99,11 @@ Template.weektable.helpers({
     }
     return false
   },
-  isTodayClass: (weekday) => (dayjs.utc(weekday, getGlobalSetting('weekviewDateFormat')).isSame(dayjs.utc(), 'day') ? 'text-primary' : ''), // Ensure consistent timezone usage
+  isTodayClass(weekday) {
+    const dateOnly = dayjs.utc(weekday, getGlobalSetting('weekviewDateFormat'))
+      .format('YYYY-MM-DD')
+    return dateOnly === dateOnlyFromLocalDate(new Date()) ? 'text-primary' : ''
+  },
 })
 
 Template.weektable.events({
@@ -105,9 +115,11 @@ Template.weektable.events({
     event.preventDefault()
     FlowRouter.setQueryParams({ date: templateInstance.startDate.get().add(1, 'week').format('YYYY-MM-DD') })
   },
-  'click .js-today': (event, templateInstance) => {
+  'click .js-today': (event) => {
     event.preventDefault()
-    FlowRouter.setQueryParams({ date: dayjs.utc().isoWeekday(getUserSetting('startOfWeek')).format('YYYY-MM-DD') }) // Ensure consistent timezone usage
+    const today = dayjs.utc(dateOnlyFromLocalDate(new Date()), 'YYYY-MM-DD')
+    const date = today.isoWeekday(getUserSetting('startOfWeek')).format('YYYY-MM-DD')
+    FlowRouter.setQueryParams({ date })
   },
   'keyup .js-hours': (event, templateInstance) => {
     if (event.keyCode === 13) {
@@ -137,10 +149,13 @@ Template.weektable.events({
           hours /= 60
         }
         const projectId = $(element).data('project-id')
-        const date = dayjs.utc(startDate.add(Number(templateInstance.$(element).data('week-day')), 'day').format('YYYY-MM-DD')).toDate() // Ensure consistent timezone usage
+        const dateOnly = startDate
+          .add(Number(templateInstance.$(element).data('week-day')), 'day')
+          .format('YYYY-MM-DD')
+        const date = dateOnlyToUTCDate(dateOnly)
         const existingElement = weekArray
           .findIndex((arrayElement) => arrayElement.projectId === projectId
-          && arrayElement.task === task && dayjs(arrayElement.date).isSame(dayjs(date)))
+          && arrayElement.task === task && arrayElement.dateOnly === dateOnly)
         if (existingElement >= 0) {
           weekArray[existingElement].hours += hours
         } else {
@@ -148,6 +163,7 @@ Template.weektable.events({
             projectId,
             task,
             date,
+            dateOnly,
             hours,
           })
         }
@@ -173,13 +189,15 @@ Template.weektable.events({
   },
   'click .js-delete-task': (event, templateInstance) => {
     event.preventDefault()
-    const startDate = templateInstance.startDate.get()?.toDate()
-    const endDate = templateInstance.endDate.get()?.toDate()
+    const startDateOnly = templateInstance.startDate.get()?.format('YYYY-MM-DD')
+    const endDateOnly = templateInstance.endDate.get()?.format('YYYY-MM-DD')
+    const startDate = dateOnlyToUTCDate(startDateOnly)
+    const endDate = dateOnlyToUTCDate(endDateOnly)
     const projectId = $(event.currentTarget).data('project-id')
     const task = $(event.currentTarget).data('task')
     if (confirm(t('notifications.delete_confirm'))) {
       Meteor.call('deleteTimeCardsForWeek', {
-        projectId, task, startDate, endDate,
+        projectId, task, startDate, endDate, startDateOnly, endDateOnly,
       }, (error) => {
         if (error) {
           console.error(error)
@@ -290,8 +308,10 @@ Template.weektablerow.helpers({
   },
   getHoursForDay(day, task) {
     if (task.entries && getGlobalSetting('weekviewDateFormat') && i18nReady.get()) {
+      const dateOnly = dayjs.utc(day, getGlobalSetting('weekviewDateFormat'))
+        .format('YYYY-MM-DD')
       const entryForDay = task.entries
-        .filter((entry) => dayjs.utc(entry.date).format(getGlobalSetting('weekviewDateFormat')) === dayjs.utc(day, getGlobalSetting('weekviewDateFormat')).format(getGlobalSetting('weekviewDateFormat'))) // Ensure consistent timezone usage
+        .filter((entry) => getTimecardDateOnly(entry) === dateOnly)
         .reduce(((total, element) => total + element.hours), 0)
       return entryForDay !== 0 ? timeInUserUnit(entryForDay) : ''
     }
@@ -310,9 +330,11 @@ Template.weektablerow.helpers({
   getTotalForDayPerProject(projectId, day) {
     let total = 0
     if (!Meteor.loggingIn() && Meteor.user() && Meteor.user().profile) {
+      const dateOnly = dayjs.utc(day, getGlobalSetting('weekviewDateFormat'))
+        .format('YYYY-MM-DD')
       Template.instance().methodTimeEntries.get().concat(Template.instance().tempTimeEntries.get()).forEach((element) => {
         if (element.entries) {
-          total += element.entries.filter((entry) => dayjs.utc(entry.date).format(getGlobalSetting('weekviewDateFormat')) === dayjs.utc(day, getGlobalSetting('weekviewDateFormat')).format(getGlobalSetting('weekviewDateFormat'))) // Ensure consistent timezone usage
+          total += element.entries.filter((entry) => getTimecardDateOnly(entry) === dateOnly)
             .reduce((tempTotal, current) => tempTotal + Number(current.hours), 0)
         }
       })

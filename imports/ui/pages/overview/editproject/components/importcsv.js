@@ -2,6 +2,10 @@ import { Meteor } from 'meteor/meteor'
 import { $ } from 'meteor/jquery'
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra'
 import { t } from '../../../../../utils/i18n'
+import {
+  dateOnlyToUTCDate,
+  isDateOnly,
+} from '../../../../../utils/timecardDate.js'
 import './importcsv.html'
 
 Template.importProjectCSV.onCreated(function importProjectCSVOnCreated() {
@@ -82,9 +86,13 @@ Template.importProjectCSV.events({
       if (isNaN(date.getTime())) {
         throw new Meteor.Error(t('project.importCSV.invalidDateFormat') + `: ${dateString}`);
       }
+      const calendarDate = isDateOnly(dateString)
       return {
         ...lowercasedEntry,
-        date,
+        date: calendarDate ? dateOnlyToUTCDate(dateString) : date,
+        ...(calendarDate
+          ? { dateOnly: dateString }
+          : { preserveLegacyTimestamp: true }),
         projectId,
       }
     })
@@ -128,7 +136,12 @@ function parseCSV(text) {
     // Date validation: Allow YYYY-MM-DD or ISO 8601 UTC
     const utcDateRegex = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
     const simpleDateRegex = /^\d{4}-\d{2}-\d{2}$/
-    if (!utcDateRegex.test(date) && !simpleDateRegex.test(date)) {
+    const parsedUTCDate = utcDateRegex.test(date) ? new Date(date) : undefined
+    const validCalendarDate = simpleDateRegex.test(date) && isDateOnly(date)
+    const validUTCDate = parsedUTCDate != null
+      && !Number.isNaN(parsedUTCDate.getTime())
+      && parsedUTCDate.toISOString() === date
+    if (!validCalendarDate && !validUTCDate) {
       throw new Meteor.Error(
         t('project.importCSV.invalidDateFormat') +
           ` ${i + 1}. Expected UTC format (YYYY-MM-DDTHH:mm:ss.sssZ) or YYYY-MM-DD.`
