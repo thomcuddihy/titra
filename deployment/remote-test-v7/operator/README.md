@@ -15,8 +15,11 @@ record, not in this repository.
 1. Inspect and hash the root-owned production Compose file without modifying it.
 2. Record the running application and Mongo container IDs, image IDs, Compose
    labels, mount identity, and network identity.
-3. Build and verify candidate, predecessor, and Mongo image archives offline.
-4. Build the release, then independently run `verify-v7-release.sh` against it.
+3. On a controlled release workstation with registry access, run
+   `build-v7-mongo-archive.sh` and retain its archive, checksum, and admission
+   metadata together. Build and verify the candidate and predecessor archives.
+4. Build the otherwise offline release from those reviewed inputs, then
+   independently run `verify-v7-release.sh` against it.
 5. Transfer only the generated console, bundle, and their two checksum sidecars
    to the configured incoming directory.
 6. Keep a separate, tested host-level backup outside the maintenance roots.

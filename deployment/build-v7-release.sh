@@ -42,6 +42,8 @@ All site identity, filesystem paths, predecessor images, and content-addressed
 image IDs are explicit inputs. The builder embeds those reviewed values into an
 immutable host-bound package; the repository contains no rendered site data.
 An optional --mongo-id must equal the Mongo metadata's portable config image ID.
+Generate the Mongo archive and metadata pair with build-v7-mongo-archive.sh;
+the release builder rechecks their schema, identities, and archive checksum.
 The release profile defaults to "hardened" and is embedded in both the exact
 candidate tag and release manifest; set it explicitly for another reviewed
 build profile. It must be a safe lower-case Docker tag component.
