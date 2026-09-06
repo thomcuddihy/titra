@@ -93,3 +93,29 @@ remove the setting immediately afterward.
 Anonymous registration is enforced on the server and is closed unless the
 `enableAnonymousLogins` database setting is the boolean value `true`. Ordinary
 self-registration remains governed by `disableUserRegistration`.
+
+## Security environment configuration
+
+The supplied Compose recipe passes the security settings below from its local
+`.env` file into Titra. Copy `.env.example` to `.env`, restrict that file to the
+deployment account (for example, mode `0600` on Linux), and keep it out of
+backups or support bundles that are shared without encryption. Boolean feature
+flags require the exact lowercase value `true`; an empty value, `false`, or any
+other spelling leaves the feature disabled.
+
+| Variable | Default and intended use |
+| --- | --- |
+| `TITRA_OAUTH_SECRET_KEY` | Empty. Required before any integration credential can be stored. Use one persistent, canonical Base64 encoding of exactly 16 random bytes and back it up separately. |
+| `TITRA_PRIVATE_INTEGRATION_HOSTS` | Empty. Optional comma-separated allowlist of exact private-network hostnames for trusted self-hosted integrations. HTTPS remains required. |
+| `TITRA_ALLOW_LOOPBACK_HTTP_INTEGRATIONS` | Disabled. Development-only opt-in for loopback HTTP integration testing; it is ignored unless `NODE_ENV=development`. |
+| `TITRA_OIDC_ALLOW_INSECURE_LOOPBACK` | Disabled. Allows loopback HTTP OIDC endpoints for local development. Never enable it on an exposed deployment. |
+| `TITRA_OIDC_ALLOW_VERIFIED_EMAIL_LINKING` | Disabled. Allows an OIDC identity with an explicitly verified email claim to link to an existing local account. Enable only when the identity provider's email verification and account lifecycle are trusted. |
+| `TITRA_ENABLE_UNSAFE_LEGACY_SCRIPTS` | Disabled. Restores execution of historical administrator-supplied JavaScript rules. This removes an important code-execution boundary and should be used only for a short, isolated migration window. Literal `return true` and `return false` rules work without it. |
+| `TITRA_ENABLE_HSTS` | Disabled. Adds a one-year `Strict-Transport-Security` header. Enable only when the public site is permanently HTTPS, including every relevant subpath and proxy route. |
+| `TITRA_OPENAI_MODEL` | Empty. Uses the application's reviewed default model. An override must contain only letters, digits, dots, underscores, or hyphens. |
+| `TITRA_ENABLE_FIRST_USER_ADMIN` | Disabled. One-time bootstrap switch for a new, isolated database, as described above. Remove it immediately after creating the intended first account. |
+| `TITRA_ENABLE_ADMIN_RECOVERY` | Disabled. Temporary, private maintenance switch for recovering an installation that has users but no active administrator. Remove it and restart immediately after recovery. |
+
+Do not bake `.env` or the OAuth key into an image. Changing
+`TITRA_OAUTH_SECRET_KEY` is not a normal key rotation: existing sealed
+credentials must first be migrated or they become unreadable.
