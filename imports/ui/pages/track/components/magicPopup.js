@@ -18,6 +18,8 @@ import {
 Template.magicPopup.onCreated(function magicPopupCreated() {
   this.magicData = new ReactiveVar([])
   this.showPopup = new ReactiveVar(false)
+  this.saveInFlight = new ReactiveVar(false)
+  this.popupGeneration = 0
   dayjs.extend(isoWeek)
   dayjs.extend(utc)
   this.subscribe('myProjects')
@@ -59,6 +61,7 @@ Template.magicPopup.onRendered(() => {
     templateInstance.showPopup.set(false)
   })
   templateInstance.$('#magicModal').on('shown.bs.modal', () => {
+    templateInstance.popupGeneration += 1
     templateInstance.showPopup.set(true)
   })
   templateInstance.autorun(() => {
@@ -104,6 +107,9 @@ Template.magicPopup.events({
   },
   'click .js-save': (event, templateInstance) => {
     event.preventDefault()
+    if (templateInstance.saveInFlight.get()) {
+      return
+    }
     let selectedEntries = []
     templateInstance.$('tbody tr').each((index, element) => {
       const selected = $(element).find('.js-magic-select').prop('checked')
@@ -159,11 +165,27 @@ Template.magicPopup.events({
       return true
     })
     if (selectedEntries.length > 0) {
-      Meteor.call('upsertWeek', selectedEntries, (result, error) => {
+      const { popupGeneration } = templateInstance
+      templateInstance.saveInFlight.set(true)
+      templateInstance.$('.js-save').prop('disabled', true)
+      Meteor.call('upsertWeek', selectedEntries, (error) => {
+        templateInstance.saveInFlight.set(false)
+        if (templateInstance.view?.isDestroyed) {
+          return
+        }
+        templateInstance.$('.js-save').prop('disabled', false)
         if (error) {
           console.error(error)
+          const message = typeof error.error === 'string'
+            && error.error.startsWith('notifications.')
+            ? t(error.error)
+            : error.reason || error.message || t('notifications.unknown_error')
+          showToast(message)
         } else {
-          templateInstance.$('#magicModal').modal('hide')
+          if (templateInstance.popupGeneration === popupGeneration
+            && templateInstance.showPopup.get()) {
+            templateInstance.$('#magicModal').modal('hide')
+          }
           showToast(t('notifications.time_entry_saved'))
         }
       })

@@ -37,6 +37,7 @@ Template.weektable.onCreated(function weekTableCreated() {
   this.endDate = new ReactiveVar()
   this.weekTotal = new ReactiveVar(0)
   this.totalForWeekPerDay = new ReactiveVar([])
+  this.weekSaveInFlight = new ReactiveVar(false)
   this.autorun(() => {
     if (this.subscriptionsReady()) {
       const today = dayjs.utc(dateOnlyFromLocalDate(new Date()), 'YYYY-MM-DD')
@@ -126,11 +127,24 @@ Template.weektable.events({
       templateInstance.$('.js-save').click()
     }
   },
+  'input .js-hours': (event) => {
+    $(event.currentTarget).attr('data-dirty', 'true')
+  },
+  'change .js-hours': (event) => {
+    $(event.currentTarget).attr('data-dirty', 'true')
+  },
   'click .js-save': (event, templateInstance) => {
     event.preventDefault()
+    if (templateInstance.weekSaveInFlight.get()) {
+      return
+    }
     const weekArray = []
+    const submittedElements = []
     let inputError = false
     templateInstance.$('.js-hours').each((index, element) => {
+      if ($(element).attr('data-dirty') !== 'true') {
+        return
+      }
       const startDate = templateInstance.startDate.get().clone().startOf('day').isoWeekday(getUserSetting('startOfWeek'))
       const value = templateInstance.$(element).val()
       if (value) {
@@ -167,22 +181,52 @@ Template.weektable.events({
             hours,
           })
         }
+        submittedElements.push(element)
       }
     })
     if (weekArray.length > 0 && !inputError) {
+      templateInstance.weekSaveInFlight.set(true)
+      templateInstance.$('.js-save').prop('disabled', true)
+      submittedElements.forEach((element) => {
+        $(element).attr('data-dirty', 'saving')
+      })
       Meteor.call('upsertWeek', weekArray, (error) => {
+        templateInstance.weekSaveInFlight.set(false)
+        if (templateInstance.view?.isDestroyed) {
+          return
+        }
+        templateInstance.$('.js-save').prop('disabled', false)
         if (error) {
           console.error(error)
+          const message = typeof error.error === 'string'
+            && error.error.startsWith('notifications.')
+            ? t(error.error)
+            : error.reason || error.message || t('notifications.unknown_error')
+          showToast(message)
+          submittedElements.forEach((element) => {
+            if ($(element).attr('data-dirty') === 'saving') {
+              $(element).attr('data-dirty', 'true')
+            }
+          })
         } else {
-          templateInstance.$('.js-tasksearch-input').val('')
-          templateInstance.$('.js-tasksearch-input').parent().parent().find('.js-hours')
-            .val('')
+          submittedElements.forEach((element) => {
+            if ($(element).attr('data-dirty') === 'saving') {
+              $(element).removeAttr('data-dirty')
+            }
+          })
           showToast(t('notifications.time_entry_updated'))
-          $('tr').trigger('save')
-          const tempStartDate = templateInstance.startDate.get()
-          templateInstance.startDate.set(undefined)
-          templateInstance.startDate.set(tempStartDate)
-          templateInstance.weekTotal.set(0)
+          const hasPendingEdits = templateInstance
+            .$('.js-hours[data-dirty="true"]').length > 0
+          if (!hasPendingEdits) {
+            templateInstance.$('.js-tasksearch-input').val('')
+            templateInstance.$('.js-tasksearch-input').parent().parent().find('.js-hours')
+              .val('')
+            $('tr').trigger('save')
+            const tempStartDate = templateInstance.startDate.get()
+            templateInstance.startDate.set(undefined)
+            templateInstance.startDate.set(tempStartDate)
+            templateInstance.weekTotal.set(0)
+          }
         }
       })
     }
