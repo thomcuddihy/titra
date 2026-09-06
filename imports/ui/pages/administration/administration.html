@@ -12,6 +12,15 @@
         <li class="nav-item">
             <a class="nav-link" id="customfields-tab" data-bs-toggle="tab" href="#customfields" role="tab" aria-controls="extensions" aria-selected="false">{{t "administration.customfields"}}</a>
         </li>
+        <li class="nav-item">
+            <a class="nav-link" id="timecardmigration-tab" data-bs-toggle="tab" href="#timecardmigration" role="tab" aria-controls="timecardmigration" aria-selected="false">
+                {{t "timecard_migration.tab"}}
+                {{#if migrationAttention}}
+                    <span class="badge rounded-pill text-bg-warning ms-1">{{migrationCandidateCount}}</span>
+                    <span class="visually-hidden">{{t "timecard_migration.legacy_warning"}}</span>
+                {{/if}}
+            </a>
+        </li>
         {{#if getGlobalSetting "enableOpenIDConnect"}}
             <li class="nav-item">
                 <a class="nav-link" id="oidc-tab" data-bs-toggle="tab" href="#oidc" role="tab" aria-controls="oidc" aria-selected="false">{{t "administration.oidc"}}</a>
@@ -56,6 +65,13 @@
             {{#if isActive "customfields-tab"}}
                 {{#if i18nReady}}
                     {{>customfieldscomponent}}
+                {{/if}}
+            {{/if}}
+        </div>
+        <div class="tab-pane fade p-3 tab-borders" id="timecardmigration">
+            {{#if isActive "timecardmigration-tab"}}
+                {{#if i18nReady}}
+                    {{>timecardmigrationcomponent}}
                 {{/if}}
             {{/if}}
         </div>

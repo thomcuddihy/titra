@@ -31,6 +31,10 @@ import {
   timecardDateAggregationExpression,
 } from '../../../utils/timecardDate.js'
 import { timecardDateStateSelector } from '../../../utils/timecardRevision.js'
+import {
+  assertTimecardDateMigrationUnlocked,
+  withTimecardDateWriteLease,
+} from '../../timecarddatemigrations/timecarddatemigrations.js'
 
 const timeEntryForbiddenCustomfieldKeys = new Set([
   '_id', 'userId', 'projectId', 'date', 'dateOnly', 'startTime', 'dateRevision',
@@ -169,6 +173,7 @@ async function insertTimeCard(
   dateOnly,
   startTime,
 ) {
+  await assertTimecardDateMigrationUnlocked()
   const safeCustomfields = sanitizeObject(customfields, timeEntryForbiddenCustomfieldKeys)
   const newTimeCard = {
     ...safeCustomfields,
@@ -192,7 +197,7 @@ async function insertTimeCard(
       { $set: { ...safeCustomfields, lastUsed: new Date() } },
     )
   }
-  return Timecards.insertAsync(newTimeCard)
+  return withTimecardDateWriteLease(() => Timecards.insertAsync(newTimeCard))
 }
 /**
  * Updates an existing timecard in the Timecards collection.
@@ -208,6 +213,7 @@ async function insertTimeCard(
  * @throws {Meteor.Error} If time entry rule fails.
  */
 async function upsertTimecard(projectId, task, date, hours, userId, dateOnly) {
+  await assertTimecardDateMigrationUnlocked()
   const { dateFields, taskName, selector } = await buildWeekTimecardContext(
     projectId,
     task,
@@ -215,64 +221,69 @@ async function upsertTimecard(projectId, task, date, hours, userId, dateOnly) {
     userId,
     dateOnly,
   )
-  const matchingTimecards = await Timecards.find(selector, {
-    sort: { _id: 1 },
-    limit: 2,
-  }).fetchAsync()
-  assertWeekCellIsUnambiguous(matchingTimecards)
+  await withTimecardDateWriteLease(async (assertWriterLease) => {
+    const matchingTimecards = await Timecards.find(selector, {
+      sort: { _id: 1 },
+      limit: 2,
+    }).fetchAsync()
+    assertWeekCellIsUnambiguous(matchingTimecards)
 
-  if (!await Tasks.findOneAsync({ userId, name: taskName })) {
-    await Tasks.insertAsync({ userId, lastUsed: new Date(), name: taskName })
-  } else {
-    await Tasks.updateAsync(
-      { userId, name: taskName },
-      { $set: { lastUsed: new Date() } },
-    )
-  }
-  if (hours === 0) {
-    if (matchingTimecards.length === 1) {
-      const removed = await Timecards.rawCollection().deleteOne(
-        timecardDateStateSelector(matchingTimecards[0]),
+    if (!await Tasks.findOneAsync({ userId, name: taskName })) {
+      await Tasks.insertAsync({ userId, lastUsed: new Date(), name: taskName })
+    } else {
+      await Tasks.updateAsync(
+        { userId, name: taskName },
+        { $set: { lastUsed: new Date() } },
       )
-      assertTimecardWriteSucceeded(removed)
     }
-  } else if (matchingTimecards.length === 1) {
-    // A legacy entry may encode its start time in date. A week-cell edit must
-    // not destroy that timestamp while its original timezone remains unknown.
-    const fieldsForUpdate = isDateOnly(matchingTimecards[0].dateOnly)
-      ? dateFields
-      : {}
-    const updated = await Timecards.rawCollection().updateOne(
-      timecardDateStateSelector(matchingTimecards[0]),
-      {
-        $set: {
-          userId,
-          projectId,
-          ...fieldsForUpdate,
-          hours,
-          task: taskName,
+    if (hours === 0) {
+      if (matchingTimecards.length === 1) {
+        await assertWriterLease()
+        const removed = await Timecards.rawCollection().deleteOne(
+          timecardDateStateSelector(matchingTimecards[0]),
+        )
+        assertTimecardWriteSucceeded(removed)
+      }
+    } else if (matchingTimecards.length === 1) {
+      // A legacy entry may encode its start time in date. A week-cell edit must
+      // not destroy that timestamp while its original timezone remains unknown.
+      const fieldsForUpdate = isDateOnly(matchingTimecards[0].dateOnly)
+        ? dateFields
+        : {}
+      await assertWriterLease()
+      const updated = await Timecards.rawCollection().updateOne(
+        timecardDateStateSelector(matchingTimecards[0]),
+        {
+          $set: {
+            userId,
+            projectId,
+            ...fieldsForUpdate,
+            hours,
+            task: taskName,
+          },
+          $inc: { dateRevision: 1 },
         },
-        $inc: { dateRevision: 1 },
-      },
-    )
-    assertTimecardWriteSucceeded(updated)
-  } else {
-    const updated = await Timecards.rawCollection().updateOne(
-      selector,
-      {
-        $set: {
-          userId,
-          projectId,
-          ...dateFields,
-          hours,
-          task: taskName,
+      )
+      assertTimecardWriteSucceeded(updated)
+    } else {
+      await assertWriterLease()
+      const updated = await Timecards.rawCollection().updateOne(
+        selector,
+        {
+          $set: {
+            userId,
+            projectId,
+            ...dateFields,
+            hours,
+            task: taskName,
+          },
+          $inc: { dateRevision: 1 },
         },
-        $inc: { dateRevision: 1 },
-      },
-      { upsert: true },
-    )
-    assertTimecardWriteSucceeded(updated)
-  }
+        { upsert: true },
+      )
+      assertTimecardWriteSucceeded(updated)
+    }
+  })
   return 'notifications.success'
 }
 async function checkProjectAdministratorAndUser(projectId, administratorId, userId) {
@@ -373,6 +384,7 @@ const upsertWeek = new ValidatedMethod({
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run(weekArray) {
+    await assertTimecardDateMigrationUnlocked()
     await Promise.all(weekArray.map(async (element) => {
       const { selector } = await buildWeekTimecardContext(
         element.projectId,
@@ -443,6 +455,7 @@ const updateTimeCard = new ValidatedMethod({
   async run({
     projectId, _id, task, date, dateOnly, startTime, hours, taskRate, customfields, user,
   }) {
+    await assertTimecardDateMigrationUnlocked()
     let { userId } = this
     if (user !== userId) {
       userId = await checkProjectAdministratorAndUser(projectId, userId, user)
@@ -474,9 +487,12 @@ const updateTimeCard = new ValidatedMethod({
     } else {
       modifier.$unset = { taskRate: '' }
     }
-    const result = await Timecards.rawCollection().updateOne(
-      timecardDateStateSelector(timecard),
-      modifier,
+    await assertTimecardDateMigrationUnlocked()
+    const result = await withTimecardDateWriteLease(
+      () => Timecards.rawCollection().updateOne(
+        timecardDateStateSelector(timecard),
+        modifier,
+      ),
     )
     assertTimecardWriteSucceeded(result)
   },
@@ -500,6 +516,7 @@ const deleteTimeCard = new ValidatedMethod({
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({ timecardId }) {
+    await assertTimecardDateMigrationUnlocked()
     const timecard = await Timecards.findOneAsync({ _id: timecardId })
     await checkTimeEntryRule({
       userId: this.userId,
@@ -511,10 +528,13 @@ const deleteTimeCard = new ValidatedMethod({
       startTime: timecard.startTime,
       hours: timecard.hours,
     })
-    const result = await Timecards.rawCollection().deleteOne({
-      ...timecardDateStateSelector(timecard),
-      userId: this.userId,
-    })
+    await assertTimecardDateMigrationUnlocked()
+    const result = await withTimecardDateWriteLease(
+      () => Timecards.rawCollection().deleteOne({
+        ...timecardDateStateSelector(timecard),
+        userId: this.userId,
+      }),
+    )
     assertTimecardWriteSucceeded(result)
     return result.deletedCount
   },
@@ -859,20 +879,25 @@ const deleteTimeCardsForWeek = new ValidatedMethod({
   async run({
     projectId, task, startDateOnly, endDateOnly,
   }) {
+    await assertTimecardDateMigrationUnlocked()
     const { startDate, endDate } = dateOnlyRange(startDateOnly, endDateOnly)
-    const matchingTimecards = await Timecards.find({
-      projectId,
-      task,
-      date: { $gte: startDate, $lte: endDate },
-    }, { sort: { _id: 1 } }).fetchAsync()
-    for (const timecard of matchingTimecards) {
-      // Delete the captured revisions in order so a concurrent edit reliably aborts the batch.
-      // eslint-disable-next-line no-await-in-loop
-      const result = await Timecards.rawCollection().deleteOne(
-        timecardDateStateSelector(timecard),
-      )
-      assertTimecardWriteSucceeded(result)
-    }
+    await withTimecardDateWriteLease(async (assertWriterLease) => {
+      const matchingTimecards = await Timecards.find({
+        projectId,
+        task,
+        date: { $gte: startDate, $lte: endDate },
+      }, { sort: { _id: 1 } }).fetchAsync()
+      for (const timecard of matchingTimecards) {
+        // Delete the captured revisions in order so a concurrent edit reliably aborts the batch.
+        // eslint-disable-next-line no-await-in-loop
+        await assertWriterLease()
+        // eslint-disable-next-line no-await-in-loop
+        const result = await Timecards.rawCollection().deleteOne(
+          timecardDateStateSelector(timecard),
+        )
+        assertTimecardWriteSucceeded(result)
+      }
+    })
   },
 })
 

@@ -33,6 +33,11 @@ timestamp because a week total cannot safely infer the timezone of its component
 record. A week cell containing multiple matching records must instead be edited in
 the details view, where each record is unambiguous.
 
+Administrators who want to make historical records explicit can use the
+[legacy date migration wizard](./timecard-date-migration.md). The wizard requires
+an administrator to choose an interpretation after previewing real records; it
+never guesses an installation's historical timezone convention.
+
 ## Concurrent changes
 
 New records include `dateRevision`. Date-bearing updates compare the complete date
