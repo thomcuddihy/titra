@@ -11,6 +11,7 @@ verification-*/
 *.tar.gz
 *.sha256
 *.receipt
+mongo-image.env
 
 # Site-specific release inputs and rendered manifests are never source files.
 release-config

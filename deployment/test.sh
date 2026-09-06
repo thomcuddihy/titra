@@ -19,15 +19,20 @@ while IFS= read -r -d '' script; do
   bash -n "$script"
 done < <(find "$SCRIPT_DIR" -type f \( -name '*.sh' -o -name '*.sh.in' \) -print0)
 
-sanitization_test="${SCRIPT_DIR}/tests/source-sanitization.test.mjs"
+node_tests=(
+  "${SCRIPT_DIR}/tests/source-sanitization.test.mjs"
+  "${SCRIPT_DIR}/tests/mongo-archive-builder.test.mjs"
+)
 if [[ ${node_exec,,} == *.exe ]]; then
   command -v wslpath >/dev/null 2>&1 || {
     printf 'ERROR: Windows Node requires wslpath.\n' >&2
     exit 1
   }
-  "$node_exec" "$(wslpath -w -- "$sanitization_test")"
+  for node_test in "${node_tests[@]}"; do
+    "$node_exec" "$(wslpath -w -- "$node_test")"
+  done
 else
-  "$node_exec" --test "$sanitization_test"
+  "$node_exec" --test "${node_tests[@]}"
 fi
 
 NODE_BIN=$node_exec "${SCRIPT_DIR}/tests/release-builder-integration.sh"

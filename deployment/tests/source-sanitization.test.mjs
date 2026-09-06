@@ -31,6 +31,7 @@ test('release profiles are explicit and local release inputs are ignored', () =>
   assert.match(ignore, /^release-config[.]\*$/m)
   assert.match(ignore, /^remote-test-v7\/manifest\/release[.]env$/m)
   assert.match(ignore, /^[.]env[.]\*$/m)
+  assert.match(ignore, /^mongo-image[.]env$/m)
 })
 
 test('release builder supplies every tracked template token', () => {
@@ -61,6 +62,7 @@ test('source tree contains no generated or private deployment material', () => {
 })
 
 test('templates contain no rendered host, personal path, image ID, or fork identity', () => {
+  const publicDigestSource = join(deploymentRoot, 'build-v7-mongo-archive.sh')
   const checks = [
     /github[.]com\/(?!titraio\/titra(?:[/'"\s]|$))/iu,
     /(?:\/home\/|[A-Za-z]:\\Users\\)[A-Za-z0-9._-]+/u,
@@ -71,7 +73,13 @@ test('templates contain no rendered host, personal path, image ID, or fork ident
   for (const path of filesBelow(deploymentRoot)) {
     if (path === self || /test_verify_docker_save_archive[.]py$/u.test(path)) continue
     if (!/\.(?:sh|in|mjs|cjs|py|md|yml|example)$/u.test(path)) continue
-    const text = readFileSync(path, 'utf8')
+    let text = readFileSync(path, 'utf8')
+    // Immutable upstream image digests are reviewed public supply-chain pins,
+    // not rendered site image IDs. Their exact relationships have a dedicated
+    // contract test; remove only those public pins from this privacy scan.
+    if (path === publicDigestSource) {
+      text = text.replaceAll(/sha256:[0-9a-f]{64}/gu, 'sha256:REVIEWED_PUBLIC_DIGEST')
+    }
     for (const check of checks) {
       assert.equal(check.test(text), false, `rendered/private value in ${relative(deploymentRoot, path)}`)
     }
