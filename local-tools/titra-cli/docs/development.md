@@ -21,6 +21,21 @@ conda run -n titra-cli-dev ruff format --check src tests scripts
 conda run -n titra-cli-dev mypy src
 ```
 
+## Dependency reproducibility
+
+`pyproject.toml` uses bounded compatible version ranges so the source package can be installed on
+supported Python versions and operating systems without publishing a lock file for one specific
+platform. Consequently, `pip install .` and `conda env create -f environment.yml` are not
+hash-locked: installations resolved at different times can select different releases within those
+bounds.
+
+This is appropriate for normal library distribution, but it is not a reproducible unattended
+deployment contract. For CI or a controlled installation, resolve the package for the target
+platform from an approved package index, review it, and retain a platform-specific constraints file
+or lock file with artifact hashes. Recreate that lock whenever the Python version or target platform
+changes. A checksum of the Titra CLI wheel alone does not authenticate its transitive dependencies,
+and private index credentials must never be written into a committed lock or configuration file.
+
 The tests use injected clocks, temporary state and configuration directories, and HTTPX mock
 transports. They do not require a real API token or a live Titra server. Focused runner tests,
 including exact v6/v7 contract rejection, atomic profile resolution, read-only command selection,
