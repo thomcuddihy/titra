@@ -26,7 +26,9 @@ The release and API-documentation workflows pin third-party GitHub Actions by
 full commit SHA, disable default token permissions, grant each job only its
 required scope, avoid persisted checkout credentials, test before publishing,
 and use the already admitted multi-platform manifest when copying between image
-registries. The image build requests both maximal provenance and an SBOM.
+registries. The registry release workflow requests both maximal provenance and
+an SBOM. The portable offline archive builder disables Docker attestations and
+instead emits a deterministic evidence manifest alongside the saved image.
 
 ## Verification
 
@@ -54,25 +56,14 @@ decrypt it, and verify the original body.
 ## Residual and follow-up items
 
 - A hosted advisory scan was deliberately not rerun because permission to transmit lockfile or dependency inventory metadata to such a service has not been granted. The offline denylist covers the findings already available, not unknown future vulnerabilities.
-- The separately distributed, deliberately untracked Titra CLI 0.3.0 wheel was
-  source-isolation tested and installed successfully with `pip check`. Its
-  runtime and development requirements use bounded compatible ranges rather
-  than a cross-platform hash-locked installation file. The reviewed WSL test
-  environment resolved Click 8.5.0, HTTPX 0.28.1, Platformdirs 4.11.5, Rich
-  15.0.0, Mypy 2.3.1, Pytest 9.1.1, pytest-cov 7.1.0, and Ruff 0.16.5. For
-  unattended installation, generate and retain a platform-specific,
-  hash-locked requirements set from an approved package mirror; do not mistake
-  the wheel checksum alone for transitive-dependency provenance.
 - The Meteor email overlay crosses a Nodemailer major version because no maintained fixed 8.x release is available. The disposable local test covers basic unauthenticated SMTP message creation and sending through Meteor's real notification path, but not provider DNS, credentials, TLS/STARTTLS, certificate validation, or delivery limits.
 - `nodemailer-openpgp` 2.2.1 is still the latest published adapter, but it declares an obsolete exact OpenPGP 5.x dependency. The v7 overlay replaces that dependency with integrity-locked OpenPGP 6.3.1. A real, isolated Node 24.20.0 test generated an ephemeral ECC key, encrypted a Nodemailer PGP/MIME message through the adapter, and decrypted and verified its body successfully. The small adapter remains a maintenance residual because upstream has not published a release that declares OpenPGP 6.x itself; retain this functional test for every future mail-runtime change.
-- Historical v5/v6 release evidence intentionally records the old images and must not be treated as the v7 runtime inventory.
 - MongoDB 7.0 should receive future supported patch updates with backup/restore rehearsal; a move to MongoDB 8 requires a separately planned compatibility and rollback exercise.
-- The local maintenance-r7 package is authenticated by independently retained
-  SHA-256 values and an exhaustive internal checksum manifest, but it is not
-  signed with a separate hardware- or identity-backed release key. Keep the
-  console and bundle digests out of band; a future broadly distributed release
-  should add signature verification and retain the generated SBOM/provenance
-  beside the immutable image digest.
+- Offline image archives are authenticated by an exhaustive SHA-256 evidence
+  manifest, but that manifest is not signed with a separate hardware- or
+  identity-backed release key. Retain its digest out of band. Broadly
+  distributed releases should add signature verification and keep the
+  registry-generated SBOM and provenance beside the immutable image digest.
 
 ## Compose security options
 
