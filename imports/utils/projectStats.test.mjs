@@ -107,11 +107,11 @@ test('project stats aggregation returns one scalar document with bounded-memory 
   ])
 })
 
-test('task-only renames, revision changes and identical updates do not alter totals', () => {
+test('task-only renames and identical updates do not alter totals', () => {
   const stats = tracker()
-  stats.added('one', record({ task: 'Old task', dateRevision: 0 }))
+  stats.added('one', record({ task: 'Old task' }))
   const before = stats.snapshot()
-  assert.equal(stats.changed('one', { task: 'New task', dateRevision: 1 }), false)
+  assert.equal(stats.changed('one', { task: 'New task' }), false)
   assert.equal(stats.changed('one', { hours: 2.5 }), false)
   assert.equal(stats.changed('one', {}), false)
   assert.deepEqual(stats.snapshot(), before)
@@ -252,7 +252,7 @@ test('observer initialization publishes one consistent initial snapshot, then ac
   assert.equal(publication.initial.length, 1)
   assert.equal(publication.initial[0].totalHours, 3)
   assert.deepEqual(publication.changes, [])
-  publication.callbacks.changed('one', { task: 'Renamed', dateRevision: 1 })
+  publication.callbacks.changed('one', { task: 'Renamed' })
   assert.deepEqual(publication.changes, [])
   publication.callbacks.changed('one', { hours: 4 })
   assert.equal(publication.changes.length, 1)
