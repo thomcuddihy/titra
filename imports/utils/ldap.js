@@ -600,7 +600,7 @@ getGlobalSettingAsync('enableLDAP').then((ldapEnabled) => {
 
       try {
         await ldap.connectAsync()
-        const user_authentication = LDAP.getSettings('LDAP_USER_AUTHENTICATION') || LDAP.getSettings('LDAP_USERNAME_FIELD') || 'uid'
+        const user_authentication = LDAP.getSettings('LDAP_USER_AUTHENTICATION') || LDAP.getSettings('LDAP_USERNAME_FIELD') || 'uid'
         debugLog(user_authentication)
         if (user_authentication && user_authentication !== 'none') {
           await ldap.bindUserIfNecessary(loginRequest.username, loginRequest.ldapPass)

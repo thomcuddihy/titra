@@ -12,7 +12,7 @@ services:
       - "3000:3000"
     restart: always
   mongodb:
-    image: mongo:7.0.40
+    image: mongo:7.0.40@sha256:b6421fd6d1c5ded6377b397d8983e2f82e2100dc5123332dcfda2065a472be5b
     container_name: titra_db
     restart: always
     environment:

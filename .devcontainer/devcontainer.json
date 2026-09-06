@@ -1,5 +1,5 @@
 {
-  "image": "geoffreybooth/meteor-base:3.5.1",
+  "image": "geoffreybooth/meteor-base:3.5.1@sha256:1685815bf3d7be5f51052401119f9885ae2c8d6dcc2d1cf6b3235b1b764c9599",
   "features": {
   },
   "customizations": {

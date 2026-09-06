@@ -1,2 +1,46 @@
-node_modules/
+# Deny the repository by default. Keep this list in lockstep with
+# deployment/build-v7-image.sh, which hashes every effective build input.
+*
+
+!Dockerfile
+!.dockerignore
+!entrypoint.sh
+!package.json
+!package-lock.json
+!rspack.config.js
+!deployment/
+deployment/*
+!deployment/security-v7/
+deployment/security-v7/*
+!deployment/security-v7/eslint-build.config.mjs
+!deployment/security-v7/remove-bundled-vulnerabilities.mjs
+!deployment/security-v7/runtime/
+!deployment/security-v7/runtime/**
+
+!public/
+!public/**
+!server/
+!server/**
+!client/
+!client/**
+!imports/
+!imports/**
+!.meteor/
+!.meteor/**
+
+# Meteor's generated local tree is neither source nor a valid image input.
 .meteor/local/
+.meteor/local/**
+
+# These names remain excluded even if they occur below an allowed source root.
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/*.jks
+**/secrets/
+**/secrets/**
+**/credentials/
+**/credentials/**

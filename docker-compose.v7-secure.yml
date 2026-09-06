@@ -1,0 +1,51 @@
+name: titra-v7
+
+# New-install/reference production recipe. Supply the reviewed v7 application
+# by immutable repository@sha256 digest and keep secrets in a root-owned file.
+# Existing installations should use the staged maintenance console first; it
+# preserves their topology and produces rollback receipts.
+services:
+  titra:
+    image: ${TITRA_IMAGE:?Set TITRA_IMAGE to the verified v7 image@sha256 digest}
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    environment:
+      ROOT_URL: ${ROOT_URL:?Set ROOT_URL to the public HTTPS URL}
+      MONGO_URL: mongodb://mongodb/titra?directConnection=true
+      PORT: "3000"
+      TITRA_PRIVATE_INTEGRATION_HOSTS: ${TITRA_PRIVATE_INTEGRATION_HOSTS:-}
+    env_file:
+      - ${TITRA_SECRETS_FILE:-./titra-v7-secrets.env}
+    ports:
+      - "127.0.0.1:${TITRA_BIND_PORT:-3000}:3000"
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+
+  mongodb:
+    image: ${MONGO_IMAGE:-mongo:7.0.40@sha256:b6421fd6d1c5ded6377b397d8983e2f82e2100dc5123332dcfda2065a472be5b}
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_DATABASE: titra
+    volumes:
+      - titra_db_volume:/data/db
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=128m
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "mongosh --quiet --eval 'quit(db.adminCommand({ping:1}).ok ? 0 : 2)' mongodb://127.0.0.1:27017/admin"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+volumes:
+  titra_db_volume:

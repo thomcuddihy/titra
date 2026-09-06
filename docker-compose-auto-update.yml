@@ -1,3 +1,6 @@
+# Deprecated for production: Watchtower follows mutable tags and holds the
+# Docker socket. Use a digest-pinned image and a controlled upgrade instead.
+# This file remains only for backward-compatible local setups.
 services:
   titra:
     image: titraio/titra
@@ -23,6 +26,8 @@ services:
       - titra_db_volume:/data/db
   watchtower:
     image: nickfedor/watchtower
+    profiles:
+      - unsafe-auto-update
     container_name: watchtower
     restart: always
     command: --cleanup --schedule "0 0 0 * * *" --label-enable

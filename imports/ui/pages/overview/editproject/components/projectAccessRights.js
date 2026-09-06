@@ -61,8 +61,9 @@ Template.projectAccessRights.onRendered(() => {
         templateInstance.project?.get()?.rates ? templateInstance.project?.get()?.rates[templateInstance.project?.get()?.userId] : '',
         templateInstance.project?.get()?.userId,
         templateInstance.project?.get()?.userId])
-      if (templateInstance.project.get()?.team) {
-        for (const member of templateInstance.project?.get()?.team) {
+      const projectTeam = templateInstance.project.get()?.team
+      if (projectTeam) {
+        for (const member of projectTeam) {
           const user = Meteor.users.findOne({ _id: member })
           if (user !== undefined) {
             data.push([user?.profile?.name,
