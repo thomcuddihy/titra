@@ -11,8 +11,8 @@ umask 077
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 SOURCE_ROOT=$(cd -- "${SCRIPT_DIR}/.." && pwd -P)
 readonly DEFAULT_OUTPUT_ROOT="${SCRIPT_DIR}/dist-v7-image"
-readonly DEFAULT_REPOSITORY='local/titra-issue250-v7'
-readonly BUILD_VARIANT='security1'
+readonly DEFAULT_REPOSITORY='local/titra'
+readonly DEFAULT_BUILD_VARIANT='hardened1'
 readonly ARCHIVE_VERIFIER="${SCRIPT_DIR}/security-v7/verify_docker_save_archive.py"
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -20,15 +20,17 @@ usage() {
   cat <<EOF
 Usage:
   $0 [--docker EXECUTABLE] [--output-root DIRECTORY] [--repository NAME]
+     [--build-variant NAME]
 
-Build and admit the immutable Linux/amd64 v7 candidate, save it as a gzip
+Build and admit an immutable Linux/amd64 release candidate, save it as a gzip
 Docker archive, and emit the reviewed nine-file evidence set. The Docker
 executable defaults to \$DOCKER_BIN, then to "docker". A Windows Docker Desktop
 CLI path exposed through WSL is supported, for example:
 
   $0 --docker '/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe'
 
-The generated tag always contains the immutable "security1" build variant,
+The generated tag always contains the selected build variant ("hardened1" by
+default),
 the 12-character Git commit prefix, and the 12-character digest prefix of the
 complete effective Docker build context. Existing output directories and
 existing candidate tags are never replaced. Portable builds explicitly omit
@@ -41,6 +43,7 @@ EOF
 docker_bin=${DOCKER_BIN:-docker}
 output_root=$DEFAULT_OUTPUT_ROOT
 repository=$DEFAULT_REPOSITORY
+build_variant=${TITRA_BUILD_VARIANT:-$DEFAULT_BUILD_VARIANT}
 while (( $# > 0 )); do
   case $1 in
     --docker)
@@ -58,13 +61,18 @@ while (( $# > 0 )); do
       repository=$2
       shift 2
       ;;
+    --build-variant)
+      (( $# >= 2 )) || die '--build-variant requires a release variant name.'
+      build_variant=$2
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
       ;;
     *)
       usage >&2
-      die "Unknown v7 image-build argument: $1"
+      die "Unknown image-build argument: $1"
       ;;
   esac
 done
@@ -73,6 +81,8 @@ done
   die 'Docker executable contains an invalid control character.'
 [[ $repository =~ ^[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*$ ]] ||
   die '--repository must be a lowercase Docker repository name without a tag or digest.'
+[[ $build_variant =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]] ||
+  die '--build-variant must be a lowercase release variant name of at most 64 characters.'
 [[ $output_root != *$'\n'* && $output_root != *$'\r'* && $output_root != *$'\t'* ]] ||
   die '--output-root contains an invalid control character.'
 
@@ -370,7 +380,7 @@ expected_meteor_versions_sha=$(awk -F $'\t' '$5 == ".meteor/versions" {print $4}
 
 short_commit=${source_commit:0:12}
 short_context=${source_context_sha:0:12}
-identity="${version}-${short_commit}-ctx${short_context}-${BUILD_VARIANT}-amd64"
+identity="${version}-${short_commit}-ctx${short_context}-${build_variant}-amd64"
 candidate_ref="${repository}:${identity}"
 [[ $candidate_ref != *:latest ]] || die 'The latest Docker tag is never permitted.'
 final_root="${output_root}/${identity}"
@@ -382,7 +392,7 @@ if existing_id=$("${docker_cmd[@]}" image inspect --format '{{.Id}}' "$candidate
 fi
 "${docker_cmd[@]}" version >/dev/null
 
-printf 'Building v7 candidate from source context %s...\n' "$source_context_sha"
+printf 'Building release candidate from source context %s...\n' "$source_context_sha"
 build_output=$("${docker_cmd[@]}" build \
   --pull=false \
   --platform=linux/amd64 \
@@ -393,7 +403,7 @@ build_output=$("${docker_cmd[@]}" build \
   --build-arg "TITRA_VERSION=${version}" \
   --build-arg "VCS_REF=${source_commit}" \
   --build-arg "SOURCE_CONTEXT_SHA256=${source_context_sha}" \
-  "$docker_source_root") || die 'Docker failed to build the v7 candidate.'
+  "$docker_source_root") || die 'Docker failed to build the release candidate.'
 build_output=${build_output//$'\r'/}
 mapfile -t build_lines < <(printf '%s\n' "$build_output" | awk 'NF')
 (( ${#build_lines[@]} == 1 )) || die 'Docker quiet build returned unexpected standard output.'
@@ -580,7 +590,7 @@ python3 "$ARCHIVE_VERIFIER" \
   --expected-source-context "$source_context_sha" \
   --expected-source-commit "$source_commit" \
   --expected-version "$version" \
-  --expected-build-variant "$BUILD_VARIANT" \
+  --expected-build-variant "$build_variant" \
   --require-portable-candidate \
   --identity-output "$archive_identity"
 config_image_id=$(python3 - "$archive_identity" "$image_id" <<'PY'
@@ -661,7 +671,7 @@ final_evidence_dir="${final_root}/evidence"
 final_archive_path="${final_root}/${archive_name}"
 cat > "${work_root}/build-result.env" <<EOF
 FORMAT_VERSION=3
-BUILD_VARIANT=${BUILD_VARIANT}
+BUILD_VARIANT=${build_variant}
 IMAGE_REF=${candidate_ref}
 IMAGE_ID=${image_id}
 CONFIG_IMAGE_ID=${config_image_id}
@@ -678,9 +688,9 @@ mv -- "$work_root" "$final_root"
 tag_created=false
 trap - EXIT INT TERM HUP
 
-printf 'V7 image build and admission passed.\n'
+printf 'Image build and admission passed.\n'
 printf '  output_directory=%s\n' "$final_root"
-printf '  build_variant=%s\n' "$BUILD_VARIANT"
+printf '  build_variant=%s\n' "$build_variant"
 printf '  image_ref=%s\n' "$candidate_ref"
 printf '  image_id=%s\n' "$image_id"
 printf '  config_image_id=%s\n' "$config_image_id"

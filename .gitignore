@@ -42,5 +42,3 @@ credentials/
 /deployment/remote-test-*/images/
 /deployment/**/*.tar
 /deployment/**/*.tar.gz
-/local-tools/titra-cli/build/
-/local-tools/titra-cli/dist/

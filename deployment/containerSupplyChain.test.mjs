@@ -180,7 +180,11 @@ test('v7 image builder hashes exactly the hardening files admitted to Docker', a
     text('Dockerfile'),
   ])
 
-  assert.match(builder, /readonly BUILD_VARIANT='security1'/)
+  assert.match(builder, /readonly DEFAULT_REPOSITORY='local\/titra'/)
+  assert.match(builder, /readonly DEFAULT_BUILD_VARIANT='hardened1'/)
+  assert.match(builder, /--build-variant/)
+  assert.match(builder, /TITRA_BUILD_VARIANT/)
+  assert.doesNotMatch(builder, /issue250-v7|security1/)
   assert.match(
     builder,
     /"deployment\/security-v7\/eslint-build\.config\.mjs"/,
