@@ -59,9 +59,9 @@ python3 "$PACKAGE_ROOT/tests/test_verify_docker_save_archive.py"
 bash "$PACKAGE_ROOT/tests/failure-rehearsal.sh"
 
 manifest="$PACKAGE_ROOT/manifest/release.env"
-[[ $(awk 'END {print NR + 0}' "$manifest") == 24 ]] || die 'R7 release manifest must contain 24 records.'
+[[ $(awk 'END {print NR + 0}' "$manifest") == 25 ]] || die 'R7 release manifest must contain 25 records.'
 actual_keys=$(awk -F= '{print $1}' "$manifest" | LC_ALL=C sort | paste -sd ',' -)
-expected_keys='MONGO_CONFIG_IMAGE_ID,MONGO_IMAGE_ARCHIVE,MONGO_SOURCE_DIGEST,MONGO_TEST_IMAGE,MONGO_TEST_IMAGE_ID,PACKAGE_RELEASE_ID,RELEASE_FORMAT,SOURCE_COMMIT,SOURCE_CONTEXT_SHA256,STOCK_IMAGE,STOCK_IMAGE_ID,TITRA_CONFIG_IMAGE_ID,TITRA_IMAGE_ARCHIVE,TITRA_IMAGE_EVIDENCE_DIRECTORY,TITRA_IMAGE_EVIDENCE_SHA256SUMS_SHA256,TITRA_TEST_IMAGE,TITRA_TEST_IMAGE_ID,TITRA_VERSION,V5_IMAGE,V5_IMAGE_ID,V6_CONFIG_IMAGE_ID,V6_IMAGE,V6_IMAGE_ARCHIVE,V6_IMAGE_ID'
+expected_keys='MONGO_CONFIG_IMAGE_ID,MONGO_IMAGE_ARCHIVE,MONGO_SOURCE_DIGEST,MONGO_TEST_IMAGE,MONGO_TEST_IMAGE_ID,PACKAGE_RELEASE_ID,RELEASE_FORMAT,RELEASE_PROFILE,SOURCE_COMMIT,SOURCE_CONTEXT_SHA256,STOCK_IMAGE,STOCK_IMAGE_ID,TITRA_CONFIG_IMAGE_ID,TITRA_IMAGE_ARCHIVE,TITRA_IMAGE_EVIDENCE_DIRECTORY,TITRA_IMAGE_EVIDENCE_SHA256SUMS_SHA256,TITRA_TEST_IMAGE,TITRA_TEST_IMAGE_ID,TITRA_VERSION,V5_IMAGE,V5_IMAGE_ID,V6_CONFIG_IMAGE_ID,V6_IMAGE,V6_IMAGE_ARCHIVE,V6_IMAGE_ID'
 [[ $actual_keys == "$expected_keys" ]] || die 'R7 release manifest keys differ from the reviewed schema.'
 grep -Fx 'RELEASE_FORMAT=7' "$manifest" >/dev/null || die 'R7 release format is not 7.'
 manifest_value() {
@@ -74,6 +74,8 @@ for key in TITRA_TEST_IMAGE_ID TITRA_CONFIG_IMAGE_ID STOCK_IMAGE_ID V5_IMAGE_ID 
 done
 [[ $(manifest_value MONGO_SOURCE_DIGEST) =~ ^sha256:[0-9a-f]{64}$ ]] ||
   die 'Manifest Mongo source digest is invalid.'
+[[ $(manifest_value RELEASE_PROFILE) =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]] ||
+  die 'Manifest release profile is invalid.'
 grep -E "^readonly EXPECTED_PROD_COMPOSE_SHA256='[0-9a-f]{64}'$" \
   "$PACKAGE_ROOT/root-scripts/common.sh" >/dev/null ||
   die 'Rendered production Compose SHA-256 is invalid.'
@@ -135,7 +137,7 @@ python3 "$PACKAGE_ROOT/tests/verify_docker_save_archive.py" \
   --expected-source-context "$(manifest_value SOURCE_CONTEXT_SHA256)" \
   --expected-source-commit "$(manifest_value SOURCE_COMMIT)" \
   --expected-version "$(manifest_value TITRA_VERSION)" \
-  --expected-build-variant security1 \
+  --expected-build-variant "$(manifest_value RELEASE_PROFILE)" \
   --require-portable-candidate
 python3 "$PACKAGE_ROOT/tests/verify_docker_save_archive.py" \
   --archive "$PACKAGE_ROOT/$(manifest_value V6_IMAGE_ARCHIVE)" \

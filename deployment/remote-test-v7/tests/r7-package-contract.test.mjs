@@ -30,6 +30,7 @@ test('r7 source is site-neutral and recognizes all approved transition identitie
   assert.match(common, /INSTALL_ROOT='[^'\r\n]+'/)
   assert.match(installer, /DESTINATION='[^'\r\n]+'/)
   assert.match(manifest, /^RELEASE_FORMAT=7$/m)
+  assert.match(manifest, /^RELEASE_PROFILE=[^\r\n]+$/m)
   assert.match(manifest, /^STOCK_IMAGE_ID=[^\r\n]+$/m)
   assert.match(manifest, /^V5_IMAGE_ID=[^\r\n]+$/m)
   assert.match(manifest, /^V6_IMAGE_ID=[^\r\n]+$/m)
@@ -42,6 +43,7 @@ test('installer replaces only exhaustively verified packages and has no incident
   assert.match(installer, /acquire_install_exclusive_lock/)
   assert.match(installer, /mv -- "\$DESTINATION" "\$previous"/)
   assert.match(installer, /mv -T -- "\$installing" "\$DESTINATION"/)
+  assert.match(installer, /chmod 0640 -- "\$\{installing\}\/root-scripts\/common[.]sh" "\$\{installing\}\/lab\/lib[.]sh"/)
 })
 
 test('original production admission remains image-ID bound', () => {

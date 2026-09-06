@@ -1,4 +1,5 @@
 # Illustrative values only. Pass reviewed values as build-v7-release.sh options.
+RELEASE_PROFILE=hardened
 EXPECTED_HOST_FQDN=titra.example.invalid
 PRODUCTION_COMPOSE_FILE=/srv/titra/docker-compose.yml
 INSTALL_ROOT=/opt/titra-maintenance-r7

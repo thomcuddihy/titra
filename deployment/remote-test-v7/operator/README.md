@@ -3,7 +3,10 @@
 The maintenance bundle is intentionally site-bound. A release engineer first
 records the intended server identity, Compose path and checksum, Compose object
 names, immutable source/candidate image IDs, archive paths, and protected
-maintenance roots. Run `deployment/build-v7-release.sh --help` for the complete
+maintenance roots. It also selects the reviewed release profile used in the
+candidate image tag; the generic default is `hardened`, and a different profile
+must be supplied explicitly with `--release-profile`. Run
+`deployment/build-v7-release.sh --help` for the complete
 input contract and keep the resulting build invocation in a private change
 record, not in this repository.
 

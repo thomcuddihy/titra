@@ -438,6 +438,7 @@ find "$installing" -type f -exec chmod 0640 -- {} +
 find "${installing}/root-scripts" "${installing}/lab" "${installing}/tests" \
   -type f -name '*.sh' \
   -exec chmod 0750 -- {} +
+chmod 0640 -- "${installing}/root-scripts/common.sh" "${installing}/lab/lib.sh"
 chmod 0644 -- "${installing}/lab/sanitize-clone.js" "${installing}/lab/tcp-proxy.mjs"
 prepared_root_identity=$(stat -Lc '%d:%i' -- "$installing") ||
   die 'Unable to capture the prepared package identity before publication.'

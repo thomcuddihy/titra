@@ -12,6 +12,13 @@ workflow developed for the Titra Docker Compose distribution.
 - `remote-test-v7/manifest/release.env.in` is the only tracked release manifest;
   the builder renders `release.env` into its disposable staging tree.
 
+The candidate image tag binds its version, source commit, source-context digest,
+release profile, and architecture. The builder's generic profile is `hardened`;
+use `--release-profile` to bind a different reviewed lower-case profile. The
+selected profile is written to the release manifest and rechecked by the
+independent verifier. `release-config.example` is illustrative only; copy it to
+an ignored local name and keep site values out of source control.
+
 Generated releases and evidence are ignored. This branch intentionally has no
 upload command and no knowledge of a particular production host.
 

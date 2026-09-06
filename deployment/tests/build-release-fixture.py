@@ -12,7 +12,9 @@ TESTS = Path(__file__).resolve().parents[1] / "remote-test-v7" / "tests"
 sys.path.insert(0, str(TESTS))
 
 from test_verify_docker_save_archive import (  # noqa: E402
-    PORTABLE_REFERENCE,
+    SOURCE_COMMIT,
+    SOURCE_CONTEXT,
+    VERSION,
     build_oci_archive,
 )
 
@@ -23,12 +25,17 @@ def sha256(path: Path) -> str:
 
 def main() -> int:
     root = Path(sys.argv[1]).resolve()
+    release_profile = sys.argv[2]
+    candidate_reference = (
+        f"local/titra-test:{VERSION}-{SOURCE_COMMIT[:12]}-"
+        f"ctx{SOURCE_CONTEXT[:12]}-{release_profile}-amd64"
+    )
     root.mkdir(parents=True, exist_ok=False)
     candidate = root / "candidate.tar.gz"
     predecessor = root / "predecessor.tar.gz"
     mongo = root / "mongo.tar.gz"
     candidate_id, _, candidate_config_id = build_oci_archive(
-        candidate, reference=PORTABLE_REFERENCE
+        candidate, reference=candidate_reference
     )
     predecessor_ref = "local/titra-predecessor:test"
     predecessor_id, _, predecessor_config_id = build_oci_archive(
@@ -66,7 +73,8 @@ def main() -> int:
         encoding="utf-8",
     )
     (root / "fixture.env").write_text(
-        f"CANDIDATE_REF={PORTABLE_REFERENCE}\n"
+        f"RELEASE_PROFILE={release_profile}\n"
+        f"CANDIDATE_REF={candidate_reference}\n"
         f"CANDIDATE_ID={candidate_id}\n"
         f"CANDIDATE_CONFIG_ID={candidate_config_id}\n"
         f"PREDECESSOR_REF={predecessor_ref}\n"

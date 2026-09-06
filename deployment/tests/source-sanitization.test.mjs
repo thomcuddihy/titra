@@ -19,6 +19,18 @@ test('only an unrendered release manifest is tracked', () => {
   const template = join(deploymentRoot, 'remote-test-v7/manifest/release.env.in')
   assert.equal(statSync(template).isFile(), true)
   assert.match(readFileSync(template, 'utf8'), /__V7_PACKAGE_RELEASE_ID__/)
+  assert.match(readFileSync(template, 'utf8'), /__V7_RELEASE_PROFILE__/)
+})
+
+test('release profiles are explicit and local release inputs are ignored', () => {
+  const builder = readFileSync(join(deploymentRoot, 'build-v7-release.sh'), 'utf8')
+  const ignore = readFileSync(join(deploymentRoot, '.gitignore'), 'utf8')
+  assert.match(builder, /release_profile='hardened'/)
+  assert.match(builder, /--release-profile/)
+  assert.match(builder, /ctx\$\{source_context_sha:0:12\}-\$\{release_profile\}-amd64/)
+  assert.match(ignore, /^release-config[.]\*$/m)
+  assert.match(ignore, /^remote-test-v7\/manifest\/release[.]env$/m)
+  assert.match(ignore, /^[.]env[.]\*$/m)
 })
 
 test('release builder supplies every tracked template token', () => {
