@@ -1,7 +1,17 @@
+/.gitattributes text eol=lf
 *.sh text eol=lf
 *.sh.in text eol=lf
 Dockerfile text eol=lf
 .meteor/release text eol=lf
+deployment/.gitignore text eol=lf
+deployment/**/*.mjs text eol=lf
+deployment/**/*.cjs text eol=lf
+deployment/**/*.js text eol=lf
+deployment/**/*.py text eol=lf
+deployment/**/*.yml text eol=lf
+deployment/**/*.md text eol=lf
+deployment/**/*.env.in text eol=lf
+deployment/**/*.example text eol=lf
 *.tar binary
 *.gz binary
 *.whl binary

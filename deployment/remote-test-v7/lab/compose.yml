@@ -1,0 +1,156 @@
+name: titra_v7_lab
+
+services:
+  mongodb:
+    image: ${MONGO_TEST_IMAGE:?MONGO_TEST_IMAGE must be supplied by the verified release manifest}
+    pull_policy: never
+    container_name: titra_v7_lab_db
+    restart: "no"
+    mem_limit: 1536m
+    cpus: 1.0
+    pids_limit: 256
+    command:
+      - mongod
+      - --bind_ip_all
+      - --port
+      - "27017"
+    volumes:
+      - titra_v7_lab_mongo_data:/data/db
+      - ./sanitize-clone.js:/opt/titra-lab/sanitize-clone.js:ro
+    networks:
+      lab_backplane:
+        aliases:
+          - mongodb
+    healthcheck:
+      test:
+        - CMD
+        - mongosh
+        - --quiet
+        - --eval
+        - "quit(db.adminCommand({ ping: 1 }).ok === 1 ? 0 : 1)"
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    labels:
+      io.titra.remote-test.scope: isolated-lab
+
+  titra:
+    image: ${TITRA_TEST_IMAGE:?TITRA_TEST_IMAGE must be supplied by the verified release manifest}
+    pull_policy: never
+    container_name: titra_v7_lab_app
+    restart: "no"
+    mem_limit: 1024m
+    cpus: 1.0
+    pids_limit: 256
+    depends_on:
+      mongodb:
+        condition: service_healthy
+    environment:
+      ROOT_URL: http://localhost:33026
+      MONGO_URL: mongodb://mongodb:27017/titra_v7_lab?directConnection=true
+      PORT: "3000"
+      NODE_ENV: production
+      TITRA_FENCE_RECOVERY_MODE: single-instance
+      TITRA_OAUTH_SECRET_KEY: ${TITRA_OAUTH_SECRET_KEY:?TITRA_OAUTH_SECRET_KEY must come from the protected r7 runtime configuration}
+      TITRA_PRIVATE_INTEGRATION_HOSTS: ${TITRA_PRIVATE_INTEGRATION_HOSTS:-}
+    expose:
+      - "3000"
+    networks:
+      lab_backplane:
+        aliases:
+          - titra
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:3000').then(r=>process.exit(r.status<500?0:1)).catch(()=>process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    labels:
+      io.titra.remote-test.scope: isolated-lab
+
+  ingress:
+    image: ${TITRA_TEST_IMAGE:?TITRA_TEST_IMAGE must be supplied by the verified release manifest}
+    pull_policy: never
+    container_name: titra_v7_lab_ingress
+    restart: "no"
+    mem_limit: 128m
+    cpus: 0.25
+    pids_limit: 64
+    entrypoint:
+      - node
+      - /opt/titra-lab/tcp-proxy.mjs
+    depends_on:
+      titra:
+        condition: service_healthy
+    environment:
+      LISTEN_HOST: 0.0.0.0
+      LISTEN_PORT: "8080"
+      TARGET_HOST: titra
+      TARGET_PORT: "3000"
+    ports:
+      - "127.0.0.1:33026:8080"
+    volumes:
+      - ./tcp-proxy.mjs:/opt/titra-lab/tcp-proxy.mjs:ro
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=16m
+    cap_drop:
+      - ALL
+    networks:
+      - lab_backplane
+      - lab_ingress
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - const n=require('node:net').connect(8080,'127.0.0.1',()=>{n.end();process.exit(0)});n.on('error',()=>process.exit(1))
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    labels:
+      io.titra.remote-test.scope: isolated-lab
+
+volumes:
+  titra_v7_lab_mongo_data:
+    name: titra_v7_lab_mongo_data
+    labels:
+      io.titra.remote-test.scope: isolated-lab
+
+networks:
+  lab_backplane:
+    name: titra_v7_lab_backplane
+    internal: true
+    labels:
+      io.titra.remote-test.scope: isolated-lab
+  lab_ingress:
+    name: titra_v7_lab_ingress
+    labels:
+      io.titra.remote-test.scope: isolated-lab

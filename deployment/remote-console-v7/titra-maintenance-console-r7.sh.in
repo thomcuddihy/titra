@@ -1,0 +1,561 @@
+#!/bin/bash
+
+set -Eeuo pipefail
+IFS=$'\n\t'
+PATH='/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin'
+export PATH
+LC_ALL=C
+export LC_ALL
+umask 077
+
+unset CDPATH ENV BASH_ENV TAR_OPTIONS GZIP AWKPATH AWKLIBPATH
+unset COMPOSE_FILE COMPOSE_PATH_SEPARATOR COMPOSE_PROJECT_NAME
+unset COMPOSE_ENV_FILES COMPOSE_PROFILES DOCKER_CONTEXT DOCKER_HOST
+unset TITRA_OPERATOR_LOCK_FD
+
+readonly RELEASE_ID='__V7_PACKAGE_RELEASE_ID__'
+readonly PACKAGE_SHA='__V7_PACKAGE_SHA256SUMS_SHA256__'
+readonly BUNDLE_SHA='__V7_BUNDLE_SHA256__'
+readonly BUNDLE_BYTES='__V7_BUNDLE_BYTES__'
+readonly BUNDLE_MEMBERS='__V7_BUNDLE_MEMBERS__'
+readonly INCOMING_DIR='__V7_INCOMING_DIR__'
+readonly BUNDLE="${INCOMING_DIR}/titra-r7-release-bundle.tar"
+readonly BUNDLE_SIDECAR="${BUNDLE}.sha256"
+readonly INSTALL_ROOT='__V7_INSTALL_ROOT__'
+readonly STATE_ROOT='__V7_STATE_ROOT__'
+readonly QUARANTINE_ROOT="${STATE_ROOT}/incoming-r7"
+readonly AUDIT_ROOT="${STATE_ROOT}/logs-v7/interactive-console"
+readonly EXPECTED_HOST_FQDN='__V7_EXPECTED_HOST_FQDN__'
+readonly CONSOLE_INSTALL_DIR='__V7_CONSOLE_INSTALL_DIR__'
+readonly CONSOLE_INSTALL_PATH="${CONSOLE_INSTALL_DIR}/console.sh"
+readonly CONSOLE_RUN_DIR='__V7_STATE_ROOT__/run/console-r7'
+readonly CONSOLE_LOCK="${CONSOLE_RUN_DIR}/console.lock"
+
+die() { printf 'ERROR: %s\n' "$*" >&2; return 1; }
+require_command() { command -v "$1" >/dev/null 2>&1 || die "Required command is unavailable: $1"; }
+mode_safe() { (( (8#$1 & 8#022) == 0 )); }
+require_root_dir() {
+  local path=$1
+  [[ -d $path && ! -L $path ]] || die "Required root directory is unsafe: ${path}"
+  [[ $(stat -c '%u' -- "$path") == '0' ]] || die "Root directory has another owner: ${path}"
+  mode_safe "$(stat -c '%a' -- "$path")" || die "Root directory is group/other-writable: ${path}"
+}
+
+[[ ${EUID} -eq 0 ]] || { printf 'ERROR: run this console as root.\n' >&2; exit 1; }
+[[ ${BASH_SOURCE[0]} == "$0" ]] || { printf 'ERROR: execute this console; do not source it.\n' >&2; exit 1; }
+[[ $# -eq 0 ]] || { printf 'ERROR: this is an interactive console and accepts no arguments.\n' >&2; exit 1; }
+[[ -t 0 && -t 1 && -t 2 && -r /dev/tty && -w /dev/tty ]] || {
+  printf 'ERROR: an attended controlling terminal is required.\n' >&2
+  exit 1
+}
+for command_name in awk basename chown cmp date dd df dirname find flock grep hostname install mktemp mv readlink rm sed sha256sum stat sync tar tee tr wc; do
+  require_command "$command_name" || exit 1
+done
+[[ $PACKAGE_SHA =~ ^[0-9a-f]{64}$ && $BUNDLE_SHA =~ ^[0-9a-f]{64}$ &&
+  $BUNDLE_BYTES =~ ^[1-9][0-9]*$ && $BUNDLE_MEMBERS =~ ^[1-9][0-9]*$ ]] || {
+  printf 'ERROR: console release pins were not rendered safely.\n' >&2
+  exit 1
+}
+[[ ${#BUNDLE_BYTES} -le 13 && ${#BUNDLE_MEMBERS} -le 6 ]] || {
+  printf 'ERROR: console release size/count pins are unreasonably large.\n' >&2
+  exit 1
+}
+(( BUNDLE_BYTES <= 1099511627776 && BUNDLE_MEMBERS <= 100000 )) || {
+  printf 'ERROR: console release exceeds the reviewed 1-TiB/100,000-member limits.\n' >&2
+  exit 1
+}
+
+actual_host=$(hostname --fqdn | tr '[:upper:]' '[:lower:]' | sed 's/[.]$//')
+[[ $actual_host == "$EXPECTED_HOST_FQDN" ]] || {
+  printf 'ERROR: console is pinned to %s, not %s.\n' "$EXPECTED_HOST_FQDN" "$actual_host" >&2
+  exit 1
+}
+console_path=$(readlink -f -- "${BASH_SOURCE[0]}") || exit 1
+[[ $console_path == "$CONSOLE_INSTALL_PATH" && -f $console_path && ! -L $console_path ]] || {
+  printf 'ERROR: install and run the verified console only at %s.\n' "$CONSOLE_INSTALL_PATH" >&2
+  exit 1
+}
+[[ -d $CONSOLE_INSTALL_DIR && ! -L $CONSOLE_INSTALL_DIR &&
+  $(readlink -f -- "$CONSOLE_INSTALL_DIR") == "$CONSOLE_INSTALL_DIR" &&
+  $(stat -c '%u:%g:%a' -- "$CONSOLE_INSTALL_DIR") == '0:0:700' &&
+  $(stat -c '%u:%g:%a:%h' -- "$console_path") == '0:0:700:1' ]] || {
+  printf 'ERROR: console directory/file must be direct root-owned mode 0700 with one file link.\n' >&2
+  exit 1
+}
+
+if [[ -e $CONSOLE_RUN_DIR || -L $CONSOLE_RUN_DIR ]]; then
+  [[ -d $CONSOLE_RUN_DIR && ! -L $CONSOLE_RUN_DIR &&
+    $(readlink -f -- "$CONSOLE_RUN_DIR") == "$CONSOLE_RUN_DIR" &&
+    $(stat -c '%u:%g:%a' -- "$CONSOLE_RUN_DIR") == '0:0:700' ]] || {
+    printf 'ERROR: console runtime directory is unsafe.\n' >&2
+    exit 1
+  }
+else
+  install -d -o root -g root -m 0700 -- "$CONSOLE_RUN_DIR"
+fi
+if [[ ! -e $CONSOLE_LOCK && ! -L $CONSOLE_LOCK ]]; then
+  (set -o noclobber; umask 077; : > "$CONSOLE_LOCK") 2>/dev/null || {
+    printf 'ERROR: could not exclusively create the console lock.\n' >&2
+    exit 1
+  }
+  chown root:root -- "$CONSOLE_LOCK"
+  chmod 0600 -- "$CONSOLE_LOCK"
+fi
+[[ -f $CONSOLE_LOCK && ! -L $CONSOLE_LOCK &&
+  $(readlink -f -- "$CONSOLE_LOCK") == "$CONSOLE_LOCK" &&
+  $(stat -c '%u:%g:%a:%h' -- "$CONSOLE_LOCK") == '0:0:600:1' ]] || {
+  printf 'ERROR: console lock is unsafe.\n' >&2
+  exit 1
+}
+exec 9<>"$CONSOLE_LOCK"
+lock_file_identity=$(stat -Lc '%d:%i:%u:%g:%a:%h' -- "$CONSOLE_LOCK")
+lock_fd_identity=$(stat -Lc '%d:%i:%u:%g:%a:%h' -- "/proc/${BASHPID}/fd/9")
+[[ $lock_fd_identity == "$lock_file_identity" && $lock_fd_identity == *':0:0:600:1' ]] || {
+  printf 'ERROR: opened console lock does not match its protected path.\n' >&2
+  exit 1
+}
+flock --exclusive --nonblock 9 || {
+  printf 'ERROR: another r7 maintenance console is already running.\n' >&2
+  exit 1
+}
+
+state_parent=$(dirname -- "$STATE_ROOT")
+require_root_dir "$state_parent" || exit 1
+for path in "$STATE_ROOT" "${STATE_ROOT}/logs-v7" "$AUDIT_ROOT" "$QUARANTINE_ROOT"; do
+  [[ ! -e $path ]] || require_root_dir "$path" || exit 1
+done
+install -d -o root -g root -m 0700 -- "$STATE_ROOT" \
+  "${STATE_ROOT}/logs-v7" "$AUDIT_ROOT" "$QUARANTINE_ROOT"
+require_root_dir "$AUDIT_ROOT" || exit 1
+require_root_dir "$QUARANTINE_ROOT" || exit 1
+run_stamp=$(date -u '+%Y%m%dT%H%M%SZ')
+audit_log="${AUDIT_ROOT}/console-${run_stamp}-$$.log"
+(set -o noclobber; umask 077; : > "$audit_log") 2>/dev/null || {
+  printf 'ERROR: could not exclusively create the console audit log: %s\n' "$audit_log" >&2
+  exit 1
+}
+chown root:root -- "$audit_log"
+chmod 0600 -- "$audit_log"
+[[ -f $audit_log && ! -L $audit_log && $(readlink -f -- "$audit_log") == "$audit_log" &&
+  $(stat -c '%u:%g:%a:%h' -- "$audit_log") == '0:0:600:1' ]] || {
+  printf 'ERROR: the new audit log is not a direct root-owned mode-0600 single-link file.\n' >&2
+  exit 1
+}
+exec 8>>"$audit_log"
+audit_file_identity=$(stat -Lc '%d:%i:%u:%g:%a:%h' -- "$audit_log")
+audit_fd_identity=$(stat -Lc '%d:%i:%u:%g:%a:%h' -- "/proc/${BASHPID}/fd/8")
+[[ $audit_fd_identity == "$audit_file_identity" && $audit_fd_identity == *':0:0:600:1' ]] || {
+  printf 'ERROR: the opened audit descriptor does not match its protected path.\n' >&2
+  exit 1
+}
+audit() {
+  printf '%s %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*" >&8
+  sync -f "$audit_log"
+}
+audit "console_started release_id=${RELEASE_ID}"
+
+TEMP_FILES=()
+register_temp_file() { TEMP_FILES+=("$1"); }
+cleanup_temp_files() {
+  local temp_file
+  for temp_file in "${TEMP_FILES[@]:-}"; do
+    case $temp_file in
+      "$CONSOLE_RUN_DIR"/titra-r7-members.*|"$CONSOLE_RUN_DIR"/titra-r7-types.*|"$CONSOLE_RUN_DIR"/titra-r7-preview.*)
+        if [[ -f $temp_file && ! -L $temp_file ]]; then
+          rm -f -- "$temp_file"
+        fi
+        ;;
+    esac
+  done
+  TEMP_FILES=()
+}
+
+require_installed() {
+  [[ -d $INSTALL_ROOT && ! -L $INSTALL_ROOT ]] || die 'The reviewed r7 package is not installed.'
+  [[ -f ${INSTALL_ROOT}/SHA256SUMS && ! -L ${INSTALL_ROOT}/SHA256SUMS ]] ||
+    die 'Installed r7 checksum manifest is absent.'
+  [[ $(sha256sum --binary "${INSTALL_ROOT}/SHA256SUMS" | awk '{print $1}') == "$PACKAGE_SHA" ]] ||
+    die 'Installed r7 package checksum-manifest digest differs from this console.'
+  (
+    cd -- "$INSTALL_ROOT"
+    sha256sum --check --strict SHA256SUMS >/dev/null
+  ) || die 'Installed r7 package failed exhaustive checksum verification.'
+}
+
+validate_incoming_ancestor_chain() {
+  local directory=$INCOMING_DIR resolved owner mode incoming_owner
+  incoming_owner=$(stat -c '%u' -- "$INCOMING_DIR") ||
+    die "Cannot inspect incoming staging owner: ${INCOMING_DIR}"
+  while :; do
+    [[ -d $directory && ! -L $directory ]] ||
+      die "Incoming ancestor is absent or unsafe: ${directory}"
+    resolved=$(readlink -f -- "$directory") ||
+      die "Cannot resolve incoming ancestor: ${directory}"
+    [[ $resolved == "$directory" ]] ||
+      die "Incoming ancestor is not canonical: ${directory}"
+    owner=$(stat -c '%u' -- "$directory")
+    mode=$(stat -c '%a' -- "$directory")
+    [[ $owner == '0' || $owner == "$incoming_owner" ]] ||
+      die "Incoming ancestor has an unexpected owner: ${directory}"
+    mode_safe "$mode" ||
+      die "Incoming ancestor is group/other-writable: ${directory}"
+    [[ $directory == '/' ]] && break
+    directory=$(dirname -- "$directory")
+  done
+}
+
+validate_incoming_path() {
+  local path=$1 resolved owner mode parent
+  validate_incoming_ancestor_chain
+  [[ -f $path && ! -L $path ]] || die "Incoming file is absent or unsafe: ${path}"
+  resolved=$(readlink -f -- "$path") || die 'Cannot resolve incoming file.'
+  [[ $resolved == "$path" ]] || die 'Incoming path is not canonical.'
+  owner=$(stat -c '%u' -- "$path")
+  mode=$(stat -c '%a' -- "$path")
+  [[ $owner == '0' || $owner == "$(stat -c '%u' -- "$INCOMING_DIR")" ]] ||
+    die 'Incoming file owner differs from root and the staging-directory owner.'
+  mode_safe "$mode" || die 'Incoming file is group/other-writable.'
+  parent=$(dirname -- "$path")
+  [[ $parent == "$INCOMING_DIR" && -d $parent && ! -L $parent ]] ||
+    die 'Incoming file escaped the fixed staging directory.'
+}
+
+BUNDLE_SOURCE_IDENTITY=''
+require_quarantine_capacity() {
+  local available total reserve required
+  available=$(df --output=avail -B1 -- "$QUARANTINE_ROOT" | awk 'NR == 2 {print $1}')
+  total=$(df --output=size -B1 -- "$QUARANTINE_ROOT" | awk 'NR == 2 {print $1}')
+  [[ $available =~ ^[0-9]+$ && $total =~ ^[0-9]+$ ]] ||
+    die 'Unable to calculate quarantine filesystem capacity.'
+  reserve=$((total / 10))
+  (( reserve >= 2147483648 )) || reserve=2147483648
+  (( reserve <= 10737418240 )) || reserve=10737418240
+  required=$((BUNDLE_BYTES * 2 + reserve))
+  (( available >= required )) ||
+    die "Insufficient quarantine capacity: available=${available}, two-package-copies-plus-reserve=${required}."
+}
+
+verify_bundle() {
+  local before after digest sidecar_line expected_sidecar
+  validate_incoming_path "$BUNDLE"
+  validate_incoming_path "$BUNDLE_SIDECAR"
+  before=$(stat -c '%d:%i:%u:%g:%a:%h:%s:%Y:%Z' -- "$BUNDLE") ||
+    die 'Cannot inspect the staged bundle identity.'
+  [[ $(stat -c '%h:%s' -- "$BUNDLE") == "1:${BUNDLE_BYTES}" ]] ||
+    die 'Bundle must have one hard link and the exact pinned byte count.'
+  digest=$(dd if="$BUNDLE" iflag=nofollow,nonblock,count_bytes,fullblock \
+    count=$((BUNDLE_BYTES + 1)) status=none | sha256sum | awk '{print $1}') ||
+    die 'Unable to read the staged bundle without following links.'
+  after=$(stat -c '%d:%i:%u:%g:%a:%h:%s:%Y:%Z' -- "$BUNDLE") ||
+    die 'Cannot re-inspect the staged bundle identity.'
+  [[ $before == "$after" ]] || die 'Staged bundle changed while its digest was being checked.'
+  [[ $digest == "$BUNDLE_SHA" ]] || die 'Bundle SHA-256 differs from the console pin.'
+  BUNDLE_SOURCE_IDENTITY=$after
+  [[ $(wc -l < "$BUNDLE_SIDECAR") == '1' ]] ||
+    die 'Bundle checksum sidecar must contain exactly one newline-terminated record.'
+  sidecar_line=$(sed -n '1p' "$BUNDLE_SIDECAR")
+  expected_sidecar="${BUNDLE_SHA}  $(basename -- "$BUNDLE")"
+  [[ $sidecar_line == "$expected_sidecar" ]] ||
+    die 'Bundle checksum sidecar is not bound to the pinned digest and fixed bundle basename.'
+  (
+    cd -- "$INCOMING_DIR"
+    sha256sum --check --strict "$(basename -- "$BUNDLE_SIDECAR")" >/dev/null
+  ) || die 'Bundle checksum sidecar failed.'
+}
+
+verify_quarantined_bundle_contents() {
+  local trusted_bundle=$1 members types first
+  [[ -f $trusted_bundle && ! -L $trusted_bundle &&
+    $(stat -c '%u:%g:%a:%h:%s' -- "$trusted_bundle") == "0:0:600:1:${BUNDLE_BYTES}" ]] ||
+    die 'Quarantined bundle is not an exact protected regular file.'
+  [[ $(sha256sum --binary "$trusted_bundle" | awk '{print $1}') == "$BUNDLE_SHA" ]] ||
+    die 'Quarantined bundle SHA-256 differs from the console pin.'
+  members=$(mktemp --tmpdir="$CONSOLE_RUN_DIR" 'titra-r7-members.XXXXXXXX')
+  register_temp_file "$members"
+  types=$(mktemp --tmpdir="$CONSOLE_RUN_DIR" 'titra-r7-types.XXXXXXXX')
+  register_temp_file "$types"
+  tar --list --file "$trusted_bundle" --quoting-style=escape > "$members"
+  tar --list --verbose --file "$trusted_bundle" --quoting-style=escape > "$types"
+  [[ $(wc -l < "$members") == "$BUNDLE_MEMBERS" ]] || die 'Bundle member count differs from the console pin.'
+  first=$(sed -n '1p' "$members")
+  [[ $first == 'titra-remote-test-r7/' ]] || die 'Bundle root is not titra-remote-test-r7.'
+  awk '
+    $0 !~ /^titra-remote-test-r7(\/[A-Za-z0-9._-]+)*\/?$/ ||
+    $0 ~ /(^|\/)\.\.?($|\/)/ || seen[$0]++ {bad=1}
+    END {exit bad}
+  ' "$members" || die 'Bundle contains an unsafe or duplicate path.'
+  awk 'substr($0,1,1) != "-" && substr($0,1,1) != "d" {bad=1} END {exit bad}' "$types" ||
+    die 'Bundle contains a link or special object.'
+  rm -f -- "$members" "$types"
+}
+
+remove_completed_quarantine() {
+  local partial=$1 stamp=$2
+  [[ -d $partial && ! -L $partial && $(readlink -f -- "$partial") == "$partial" &&
+    $partial == "${QUARANTINE_ROOT}/${RELEASE_ID}.${stamp}.partial" ]] ||
+    die 'Refusing to clean an unexpected quarantine path.'
+  rm -rf --one-file-system -- "$partial"
+  [[ ! -e $partial && ! -L $partial ]] || die 'Verified quarantine package cleanup was incomplete.'
+}
+
+install_package() {
+  local stamp partial package_root trusted_bundle trusted_bundle_partial
+  local receipt receipt_partial confirmation output phrase source_after
+  verify_bundle
+  require_quarantine_capacity
+  stamp=$(date -u '+%Y%m%dT%H%M%SZ')
+  partial="${QUARANTINE_ROOT}/${RELEASE_ID}.${stamp}.partial"
+  receipt="${QUARANTINE_ROOT}/${RELEASE_ID}.${stamp}.receipt"
+  receipt_partial="${receipt}.partial.$$"
+  [[ ! -e $partial && ! -e $receipt && ! -e $receipt_partial ]] ||
+    die 'Generated quarantine or receipt destination already exists.'
+  install -d -o root -g root -m 0700 -- "$partial"
+  trusted_bundle="${partial}/bundle.tar"
+  trusted_bundle_partial="${partial}/.bundle.tar.partial"
+  dd if="$BUNDLE" of="$trusted_bundle_partial" bs=1M count=$((BUNDLE_BYTES + 1)) \
+    iflag=count_bytes,nofollow,nonblock,fullblock oflag=nofollow \
+    conv=excl,fsync status=none
+  source_after=$(stat -c '%d:%i:%u:%g:%a:%h:%s:%Y:%Z' -- "$BUNDLE") ||
+    die 'Cannot re-inspect the staged bundle after quarantine copying.'
+  [[ $source_after == "$BUNDLE_SOURCE_IDENTITY" ]] ||
+    die 'Staged bundle changed between verification and quarantine copying.'
+  [[ $(stat -c '%s' -- "$trusted_bundle_partial") == "$BUNDLE_BYTES" &&
+    $(sha256sum --binary "$trusted_bundle_partial" | awk '{print $1}') == "$BUNDLE_SHA" ]] ||
+    die 'Quarantined bundle copy differs from the pinned source.'
+  chown root:root -- "$trusted_bundle_partial"
+  chmod 0600 -- "$trusted_bundle_partial"
+  mv -- "$trusted_bundle_partial" "$trusted_bundle"
+  verify_quarantined_bundle_contents "$trusted_bundle"
+  tar --extract --file "$trusted_bundle" --directory "$partial" \
+    --no-same-owner --no-same-permissions --no-overwrite-dir
+  package_root="${partial}/titra-remote-test-r7"
+  [[ -d $package_root && ! -L $package_root ]] || die 'Extracted package root is absent.'
+  chown -R root:root -- "$partial"
+  find "$partial" -type d -exec chmod 0750 -- {} +
+  find "$partial" -type f -exec chmod 0640 -- {} +
+  chmod 0600 -- "$trusted_bundle"
+  find "${package_root}/root-scripts" "${package_root}/lab" "${package_root}/tests" \
+    -type f -name '*.sh' -exec chmod 0750 -- {} +
+  [[ $(sha256sum --binary "${package_root}/SHA256SUMS" | awk '{print $1}') == "$PACKAGE_SHA" ]] ||
+    die 'Extracted package checksum-manifest digest differs from the console pin.'
+  (
+    cd -- "$package_root"
+    sha256sum --check --strict SHA256SUMS >/dev/null
+  ) || die 'Extracted package failed exhaustive checksum verification.'
+  output=$(mktemp --tmpdir="$CONSOLE_RUN_DIR" 'titra-r7-preview.XXXXXXXX')
+  register_temp_file "$output"
+  if ! "${package_root}/root-scripts/install.sh" --dry-run | tee "$output"; then
+    return 1
+  fi
+  [[ $(grep -c '^Required installation confirmation: ' "$output") == '1' ]] ||
+    die 'Installer dry run did not emit exactly one installation confirmation.'
+  phrase=$(sed -n 's/^Required installation confirmation: //p' "$output")
+  confirmation='INSTALL VERIFIED TITRA REMOTE TEST R7 PACKAGE'
+  [[ $phrase == "$confirmation" ]] ||
+    die 'Installer dry-run confirmation differs from the console-pinned phrase.'
+  rm -f -- "$output"
+  printf 'Type the exact installation confirmation shown above, or blank to cancel:\n> ' >/dev/tty
+  IFS= read -r reply </dev/tty || die 'Unable to read installation confirmation.'
+  if [[ -z $reply ]]; then
+    remove_completed_quarantine "$partial" "$stamp"
+    printf 'Installation cancelled; the verified temporary quarantine copy was removed.\n'
+    return 0
+  fi
+  [[ $reply == "$confirmation" ]] || die 'Installation confirmation mismatch.'
+  "${package_root}/root-scripts/install.sh" --confirm "$reply"
+  require_installed
+  (set -o noclobber; umask 077; : > "$receipt_partial") ||
+    die 'Could not exclusively create the installation receipt.'
+  {
+    printf 'format_version=1\n'
+    printf 'release_id=%s\n' "$RELEASE_ID"
+    printf 'package_sha256sums_sha256=%s\n' "$PACKAGE_SHA"
+    printf 'bundle_sha256=%s\n' "$BUNDLE_SHA"
+    printf 'installed_root=%s\n' "$INSTALL_ROOT"
+    printf 'completed_utc=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+  } > "$receipt_partial"
+  chown root:root -- "$receipt_partial"
+  chmod 0600 -- "$receipt_partial"
+  [[ -f $receipt_partial && ! -L $receipt_partial &&
+    $(stat -c '%u:%g:%a:%h' -- "$receipt_partial") == '0:0:600:1' ]] ||
+    die 'Installation receipt temporary file is unsafe.'
+  remove_completed_quarantine "$partial" "$stamp"
+  mv -- "$receipt_partial" "$receipt"
+  sync -f "$receipt"
+  sync -f "$QUARANTINE_ROOT"
+  printf 'Package installed; the duplicate quarantine copy was removed. Receipt: %s\n' "$receipt"
+}
+
+prompt_token() {
+  local label=$1 pattern=$2 value
+  printf '%s: ' "$label" >/dev/tty
+  IFS= read -r value </dev/tty || return 1
+  [[ $value =~ $pattern ]] || die "Invalid ${label}."
+  printf '%s\n' "$value"
+}
+
+run_preview_then_confirm() {
+  local script=$1 required_prefix=$2
+  shift 2
+  local output phrase reply
+  output=$(mktemp --tmpdir="$CONSOLE_RUN_DIR" 'titra-r7-preview.XXXXXXXX')
+  register_temp_file "$output"
+  if ! "$script" "$@" --dry-run | tee "$output"; then
+    rm -f -- "$output"
+    return 1
+  fi
+  phrase=$(sed -n "s/^${required_prefix}: //p" "$output")
+  rm -f -- "$output"
+  [[ -n $phrase && $(grep -c '^' <<< "$phrase") == '1' ]] || die 'Preview did not emit one exact confirmation.'
+  printf 'Paste the exact confirmation above, or blank to cancel:\n> ' >/dev/tty
+  IFS= read -r reply </dev/tty || die 'Unable to read confirmation.'
+  [[ -n $reply ]] || { printf 'Action cancelled.\n'; return 0; }
+  [[ $reply == "$phrase" ]] || die 'Confirmation mismatch.'
+  "$script" "$@" --confirm "$reply"
+}
+
+prompt_target() {
+  local value
+  printf 'Deployment target (v6 or v7): ' >/dev/tty
+  IFS= read -r value </dev/tty || return 1
+  [[ $value == v6 || $value == v7 ]] || die 'Target must be v6 or v7.'
+  printf '%s\n' "$value"
+}
+
+image_load_preview() {
+  require_installed
+  "${INSTALL_ROOT}/root-scripts/load-release-images.sh" --dry-run
+}
+
+image_load_run() {
+  require_installed
+  run_preview_then_confirm "${INSTALL_ROOT}/root-scripts/load-release-images.sh" \
+    'Required confirmation'
+}
+
+runtime_show() {
+  require_installed
+  "${INSTALL_ROOT}/root-scripts/configure-v7-runtime.sh" --show
+}
+
+runtime_configure() {
+  require_installed
+  local hosts
+  printf 'Comma-separated exact lowercase private hosts (blank clears): ' >/dev/tty
+  IFS= read -r hosts </dev/tty || return 1
+  run_preview_then_confirm "${INSTALL_ROOT}/root-scripts/configure-v7-runtime.sh" \
+    'Required confirmation' --private-integration-hosts "$hosts"
+}
+
+deployment_preview() {
+  require_installed
+  local ticket target
+  ticket=$(prompt_token 'Change ticket' '^[A-Za-z0-9][A-Za-z0-9_.:@/+\=-]{0,254}$') || return 1
+  target=$(prompt_target) || return 1
+  "${INSTALL_ROOT}/root-scripts/deploy-production-candidate.sh" \
+    --ticket "$ticket" --target "$target" --dry-run
+}
+
+status_action() {
+  require_installed
+  "${INSTALL_ROOT}/root-scripts/status.sh"
+}
+
+deployment_run() {
+  require_installed
+  local ticket target
+  ticket=$(prompt_token 'Change ticket' '^[A-Za-z0-9][A-Za-z0-9_.:@/+\=-]{0,254}$') || return 1
+  target=$(prompt_target) || return 1
+  run_preview_then_confirm "${INSTALL_ROOT}/root-scripts/deploy-production-candidate.sh" \
+    'Required deployment confirmation' --ticket "$ticket" --target "$target"
+}
+
+rollback_preview() {
+  require_installed
+  local ticket deployment_run
+  ticket=$(prompt_token 'Change ticket' '^[A-Za-z0-9][A-Za-z0-9_.:@/+\=-]{0,254}$') || return 1
+  deployment_run=$(prompt_token 'Successful or failed-post-switch r7 deployment run' '^deploy-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$') || return 1
+  "${INSTALL_ROOT}/root-scripts/rollback-production-candidate.sh" \
+    --ticket "$ticket" --deployment-run "$deployment_run" --dry-run
+}
+
+rollback_run() {
+  require_installed
+  local ticket deployment_run
+  ticket=$(prompt_token 'Change ticket' '^[A-Za-z0-9][A-Za-z0-9_.:@/+\=-]{0,254}$') || return 1
+  deployment_run=$(prompt_token 'Successful or failed-post-switch r7 deployment run' '^deploy-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$') || return 1
+  run_preview_then_confirm "${INSTALL_ROOT}/root-scripts/rollback-production-candidate.sh" \
+    'Required rollback confirmation' --ticket "$ticket" --deployment-run "$deployment_run"
+}
+
+support_instructions() {
+  cat <<EOF
+Share only a sanitized support.log by default. As root, after reviewing its path:
+  install -o OPERATOR -g OPERATOR -m 0600 -- ${AUDIT_ROOT%/interactive-console}/RUN/support.log SAFE_DESTINATION
+Do not copy diagnostic.log, database manifests, or Compose material without review.
+Console audit log: ${audit_log}
+EOF
+}
+
+run_action() {
+  local name=$1 status
+  shift
+  audit "action=${name} status=STARTED"
+  set +e
+  (
+    set -Eeuo pipefail
+    TEMP_FILES=()
+    trap cleanup_temp_files EXIT
+    trap 'action_status=$?; action_line=$LINENO; trap - ERR; audit "action=${name} unexpected_failure_line=${action_line} exit_status=${action_status}" || true; exit "$action_status"' ERR
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    "$@"
+  )
+  status=$?
+  set -e
+  cleanup_temp_files
+  if (( status == 0 )); then
+    audit "action=${name} status=COMPLETED"
+    printf 'Action completed.\n'
+  else
+    audit "action=${name} status=FAILED exit_status=${status}"
+    printf 'Action failed (status %s). Console audit log: %s\n' "$status" "$audit_log" >&2
+  fi
+}
+
+while :; do
+  cat <<EOF
+
+Titra maintenance-r7 console
+  1) Status
+  2) Verify and install staged r7 package
+  3) Preview loading pinned predecessor, candidate, and MongoDB images
+  4) Load and verify pinned predecessor, candidate, and MongoDB images
+  5) Show v7 runtime security configuration
+  6) Configure exact private integration hosts (before v7)
+  7) Preview a supported deployment path
+  8) Deploy v6 or v7 through a supported path
+  9) Preview a receipt-bound full rollback
+ 10) Full rollback (source application and predeployment database)
+ 11) Show safe support-log copy instructions
+  0) Exit
+EOF
+  printf 'Selection: ' >/dev/tty
+  IFS= read -r selection </dev/tty || selection=0
+  case $selection in
+    1) run_action status status_action ;;
+    2) run_action install install_package ;;
+    3) run_action image_load_preview image_load_preview ;;
+    4) run_action image_load image_load_run ;;
+    5) run_action runtime_show runtime_show ;;
+    6) run_action runtime_configure runtime_configure ;;
+    7) run_action deploy_preview deployment_preview ;;
+    8) run_action deploy deployment_run ;;
+    9) run_action rollback_preview rollback_preview ;;
+    10) run_action rollback rollback_run ;;
+    11) support_instructions ;;
+    0) audit 'console_exited'; printf 'Console audit log: %s\n' "$audit_log"; exit 0 ;;
+    *) printf 'Invalid selection.\n' >&2 ;;
+  esac
+done
