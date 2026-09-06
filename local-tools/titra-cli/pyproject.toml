@@ -1,0 +1,60 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "titra-cli"
+version = "0.3.0"
+description = "Safe interactive and scriptable command-line client for Titra"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "Titra CLI contributors" }]
+dependencies = [
+  "click>=8.1.8,<9",
+  "httpx>=0.28.1,<1",
+  "platformdirs>=4.3.6,<5",
+  "rich>=13.9.4,<16",
+  "tomli-w>=1.2.0,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.15.0,<3",
+  "pytest>=8.3.5,<10",
+  "pytest-cov>=6.0.0,<8",
+  "ruff>=0.11.0,<1",
+]
+
+[project.scripts]
+titra = "titra_cli.cli:main"
+titra-cli-test = "titra_cli.selftest:main"
+titra-cli-test-v7 = "titra_cli.v7_harness:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/titra_cli"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-config --strict-markers -ra"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["titra_cli"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+pretty = true
