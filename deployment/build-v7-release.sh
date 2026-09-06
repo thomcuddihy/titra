@@ -17,7 +17,7 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 usage() {
   cat <<EOF
 Usage:
-  $0 [--node EXECUTABLE] \\
+  $0 [--node EXECUTABLE] [--release-profile SAFE_PROFILE] \\
      --release-id SAFE_ID --titra-version X.Y.Z --candidate-ref LOCAL_REF \\
      --candidate-id sha256:... --candidate-config-id sha256:... \\
      --candidate-archive FILE \\
@@ -42,12 +42,16 @@ All site identity, filesystem paths, predecessor images, and content-addressed
 image IDs are explicit inputs. The builder embeds those reviewed values into an
 immutable host-bound package; the repository contains no rendered site data.
 An optional --mongo-id must equal the Mongo metadata's portable config image ID.
+The release profile defaults to "hardened" and is embedded in both the exact
+candidate tag and release manifest; set it explicitly for another reviewed
+build profile. It must be a safe lower-case Docker tag component.
 The Node executable defaults to \$NODE_BIN, then to "node". A Windows node.exe
 path exposed through WSL is supported; test paths are translated with wslpath.
 EOF
 }
 
 node_bin=${NODE_BIN:-node}
+release_profile='hardened'
 release_id=''
 titra_version=''
 candidate_ref=''
@@ -91,6 +95,7 @@ while (( $# > 0 )); do
       node_bin=$2
       shift 2
       ;;
+    --release-profile) release_profile=${2:-}; shift 2 ;;
     --release-id) release_id=${2:-}; shift 2 ;;
     --titra-version) titra_version=${2:-}; shift 2 ;;
     --candidate-ref) candidate_ref=${2:-}; shift 2 ;;
@@ -141,9 +146,11 @@ done
 [[ $candidate_config_id =~ ^sha256:[0-9a-f]{64}$ ]] || die '--candidate-config-id is invalid.'
 [[ $source_commit =~ ^[0-9a-f]{40}$ ]] || die '--source-commit must be 40 lowercase hexadecimal characters.'
 [[ $source_context_sha =~ ^[0-9a-f]{64}$ ]] || die '--source-context-sha256 is invalid.'
-expected_candidate_tag="${titra_version}-${source_commit:0:12}-ctx${source_context_sha:0:12}-security1-amd64"
+[[ $release_profile =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]] ||
+  die '--release-profile must be a safe lower-case Docker tag component.'
+expected_candidate_tag="${titra_version}-${source_commit:0:12}-ctx${source_context_sha:0:12}-${release_profile}-amd64"
 [[ ${candidate_ref##*:} == "$expected_candidate_tag" ]] ||
-  die '--candidate-ref does not use the exact immutable v7 security1 tag.'
+  die "--candidate-ref does not use the exact immutable v7 ${release_profile} tag."
 [[ $compose_sha =~ ^[0-9a-f]{64}$ ]] || die '--compose-sha256 is invalid.'
 [[ $compose_bytes =~ ^[1-9][0-9]*$ ]] || die '--compose-bytes is invalid.'
 [[ $stock_ref =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$ ]] || die '--stock-ref is invalid.'
@@ -353,6 +360,7 @@ done
 
 python3 - "$stage" \
   '__V7_PACKAGE_RELEASE_ID__' "$release_id" \
+  '__V7_RELEASE_PROFILE__' "$release_profile" \
   '__V7_TITRA_VERSION__' "$titra_version" \
   '__V7_TITRA_IMAGE__' "$candidate_ref" \
   '__V7_TITRA_IMAGE_ID__' "$candidate_id" \
@@ -476,6 +484,7 @@ trap - EXIT INT TERM HUP
 rm -rf -- "$work_root"
 printf 'Maintenance-r7 release assembly passed.\n'
 printf '  release_id=%s\n' "$release_id"
+printf '  release_profile=%s\n' "$release_profile"
 printf '  titra_version=%s\n' "$titra_version"
 printf '  stock_ref=%s\n' "$stock_ref"
 printf '  stock_image_id=%s\n' "$stock_id"

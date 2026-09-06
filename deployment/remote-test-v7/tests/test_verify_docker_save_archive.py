@@ -23,7 +23,7 @@ REFERENCE = "local/titra-test:portable"
 VERSION = "1.0.12"
 SOURCE_COMMIT = "a" * 40
 SOURCE_CONTEXT = "b" * 64
-BUILD_VARIANT = "security1"
+BUILD_VARIANT = "hardened"
 PORTABLE_REFERENCE = (
     f"local/titra-test:{VERSION}-{SOURCE_COMMIT[:12]}-"
     f"ctx{SOURCE_CONTEXT[:12]}-{BUILD_VARIANT}-amd64"
@@ -264,7 +264,7 @@ class DockerSaveArchiveTests(unittest.TestCase):
         path, _, _, config_id, temporary = self.archive()
         with (
             temporary,
-            self.assertRaisesRegex(VerificationError, "immutable security1 tag"),
+            self.assertRaisesRegex(VerificationError, "immutable hardened tag"),
         ):
             verify_archive(
                 path,

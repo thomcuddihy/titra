@@ -11,3 +11,12 @@ verification-*/
 *.tar.gz
 *.sha256
 *.receipt
+
+# Site-specific release inputs and rendered manifests are never source files.
+release-config
+release-config.*
+!release-config.example
+.env
+.env.*
+!*.env.in
+remote-test-v7/manifest/release.env

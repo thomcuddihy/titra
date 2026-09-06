@@ -18,12 +18,13 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM HUP
 
-python3 "${SCRIPT_DIR}/build-release-fixture.py" "${fixture_root}/inputs"
+python3 "${SCRIPT_DIR}/build-release-fixture.py" "${fixture_root}/inputs" testprofile
 # shellcheck disable=SC1091 -- generated, fixed-schema test data
 source "${fixture_root}/inputs/fixture.env"
 
 "${DEPLOYMENT_ROOT}/build-v7-release.sh" \
   --release-id "$release_id" \
+  --release-profile "$RELEASE_PROFILE" \
   --titra-version 1.0.12 \
   --candidate-ref "$CANDIDATE_REF" \
   --candidate-id "$CANDIDATE_ID" \
