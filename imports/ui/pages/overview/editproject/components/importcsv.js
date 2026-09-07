@@ -224,5 +224,3 @@ Template.importProjectCSV.helpers({
     return Template.instance().loading.get()
   },
 })
-
-

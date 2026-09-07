@@ -470,5 +470,3 @@ Meteor.publish('singleTimecard', async function singleTimecard(_id) {
   reconcile()
   return this.ready()
 })
-
-

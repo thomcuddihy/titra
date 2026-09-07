@@ -899,5 +899,3 @@ export {
   getDefaultVerificationSettingsAsync,
   calculateSimilarity,
 }
-
-

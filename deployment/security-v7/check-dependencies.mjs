@@ -86,7 +86,19 @@ assert.doesNotMatch(dockerfile, /curl\s+[^\n]*\|\s*(sh|bash)/u)
 
 const compose = await readFile('docker-compose.yml', 'utf8')
 assert.match(compose, /image: mongo:7\.0\.40@sha256:[a-f0-9]{64}/u)
-assert.doesNotMatch(compose, /TITRA_ALLOW_LOOPBACK_HTTP_INTEGRATIONS/u)
-assert.doesNotMatch(compose, /TITRA_ENABLE_FIRST_USER_ADMIN=true/u)
+for (const setting of [
+  'TITRA_ALLOW_LOOPBACK_HTTP_INTEGRATIONS',
+  'TITRA_OIDC_ALLOW_INSECURE_LOOPBACK',
+  'TITRA_ENABLE_UNSAFE_LEGACY_SCRIPTS',
+  'TITRA_ENABLE_FIRST_USER_ADMIN',
+  'TITRA_ENABLE_ADMIN_RECOVERY',
+]) {
+  assert.match(
+    compose,
+    new RegExp(`^\\s*- ${setting}=\\$\\{${setting}:-\\}$`, 'mu'),
+    `${setting} must remain an explicit, disabled-by-default operator setting`,
+  )
+  assert.doesNotMatch(compose, new RegExp(`${setting}=(?:true|1|yes)`, 'iu'))
+}
 
 console.log('Dependency policy check passed: 4 locks, pinned runtimes, supported OpenPGP, safe compose defaults, and known-version floors verified.')

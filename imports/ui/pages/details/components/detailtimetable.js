@@ -757,5 +757,3 @@ Template.detailtimetable.onDestroyed(() => {
   }
   Template.instance().datatable = undefined
 })
-
-
