@@ -66,7 +66,7 @@ function rethrowProjectPresentationValidation(error) {
 
 const forbiddenProjectMutationFields = new Set([
   '_id', 'userId', 'team', 'admins', 'rates', 'projectRevision',
-  'lifecycleLock', 'lifecycleWriters', 'archived',
+  '_statsRevision', 'lifecycleLock', 'lifecycleWriters', 'archived',
 ])
 
 function validProjectMutationField(name) {

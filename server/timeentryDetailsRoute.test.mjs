@@ -31,7 +31,9 @@ function fixture(overrides = {}) {
       state: 'new', custom: { remains: true }, ...overrides,
     },
   }
-  const calls = { writes: [], rules: [], leases: 0, moveFences: [] }
+  const calls = {
+    writes: [], rules: [], leases: 0, moveFences: [], statsInvalidations: [],
+  }
   const deps = {
     findTimecard: async (selector) => (matches(state.record, selector)
       ? structuredClone(state.record) : undefined),
@@ -42,6 +44,10 @@ function fixture(overrides = {}) {
     moveToProjectWithFence: async ({ projectId, userId, write }) => {
       calls.moveFences.push({ projectId, userId })
       return write()
+    },
+    withStatsInvalidation: async (projectIds, operation) => {
+      calls.statsInvalidations.push([...projectIds])
+      return operation()
     },
     updateOne: async (selector, modifier) => {
       calls.writes.push(structuredClone({ selector, modifier }))
@@ -93,6 +99,7 @@ test('hours/project/calendar update is one guarded write and preserves every oth
   assert.deepEqual(f.calls.rules[0].custom, { remains: true })
   assert.deepEqual(f.calls.writes[0].modifier.$unset, { startTime: '' })
   assert.deepEqual(f.calls.moveFences, [{ projectId: 'project-2', userId: 'owner-1' }])
+  assert.deepEqual(f.calls.statsInvalidations, [['project-1', 'project-2']])
 })
 
 test('legacy calendar conversion is explicit and project/hour-only edits preserve legacy date', async () => {
@@ -157,6 +164,27 @@ test('no-op verifies the snapshot without incrementing its revision', async () =
   assert.equal(result.etag, '"titra-date-revision-4"')
   assert.equal(f.calls.writes.length, 0)
   assert.equal(f.calls.moveFences.length, 0)
+  assert.equal(f.calls.statsInvalidations.length, 0)
+})
+
+test('start-time-only edits do not refresh aggregate statistics', async () => {
+  const f = fixture()
+  await editOwnedTimecardDetails({
+    timecardId: 'record-1', userId: 'owner-1', expectedDateRevision: 4,
+    body: { expected: { startTime: '09:00' }, changes: { startTime: '09:30' } },
+  }, f.deps)
+  assert.equal(f.calls.writes.length, 1)
+  assert.equal(f.calls.statsInvalidations.length, 0)
+})
+
+test('failed statistics-affecting CAS remains inside the invalidation boundary', async () => {
+  const f = fixture()
+  f.deps.updateOne = async () => ({ matchedCount: 0 })
+  await assert.rejects(editOwnedTimecardDetails({
+    timecardId: 'record-1', userId: 'owner-1', expectedDateRevision: 4,
+    body: { expected: { hours: 1.25 }, changes: { hours: 2 } },
+  }, f.deps), failsWith('timecard-write-conflict'))
+  assert.deepEqual(f.calls.statsInvalidations, [['project-1', 'project-1']])
 })
 
 test('project-only move performs its CAS inside the target project writer fence', async () => {

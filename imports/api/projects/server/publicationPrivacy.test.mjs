@@ -62,6 +62,12 @@ test('member projection retains fields used by existing clients and safe configu
   assert.equal(fields.$private, undefined)
   assert.equal(fields.lifecycleLock, undefined)
   assert.equal(fields.lifecycleWriters, undefined)
+  assert.equal(projectFields({
+    member: true, customFieldNames: ['_statsRevision'],
+  })._statsRevision, undefined)
+  assert.equal(projectFieldsForCaller({
+    _id: 'p1', userId: 'caller', _statsRevision: 7,
+  }, 'caller', ['_statsRevision'])._statsRevision, undefined)
 })
 
 test('member and public selectors are deliberately disjoint', () => {

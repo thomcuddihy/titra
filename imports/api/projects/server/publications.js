@@ -18,6 +18,7 @@ import {
 } from '../../../utils/projectStats.js'
 import {
   applyObserverChange,
+  createCoalescedAsyncRefresh,
   createPublicationReconciler,
 } from '../../../utils/reactivePublication.js'
 import {
@@ -160,6 +161,7 @@ Meteor.publish('projectStats', async function projectStats(projectId) {
   }, {
     fields: {
       _id: 1, userId: 1, admins: 1, team: 1, public: 1, rate: 1, rates: 1,
+      _statsRevision: 1,
     },
   })
   // Do not run an all-history aggregation merely because an authenticated
@@ -208,7 +210,7 @@ Meteor.publish('projectStats', async function projectStats(projectId) {
   }
   const refresh = async () => {
     const snapshot = project
-    const generation = ++aggregationGeneration
+    const generation = aggregationGeneration
     if (!canViewProjectUnderPolicy(snapshot, callerId, publicDisabled)) {
       reconciler.removeAll()
       return
@@ -230,9 +232,13 @@ Meteor.publish('projectStats', async function projectStats(projectId) {
       monthNames,
     }))
   }
+  const refreshQueue = createCoalescedAsyncRefresh(refresh)
   const refreshAfterChange = () => {
     if (!initialized || stopped) return
-    refresh().catch((error) => {
+    // Invalidate a running aggregation immediately; the queue will publish one
+    // final snapshot for the most recent observed project revision.
+    aggregationGeneration += 1
+    refreshQueue.request().catch((error) => {
       if (!stopped) this.error(error)
     })
   }
@@ -240,11 +246,13 @@ Meteor.publish('projectStats', async function projectStats(projectId) {
   this.onStop(() => {
     stopped = true
     aggregationGeneration += 1
+    refreshQueue.stop()
     if (projectHandle) projectHandle.stop()
   })
   projectHandle = await Projects.find({ _id: projectId }, {
     fields: {
       _id: 1, userId: 1, admins: 1, team: 1, public: 1, rate: 1, rates: 1,
+      _statsRevision: 1,
     },
   }).observeChangesAsync({
     added(id, fields) {
@@ -273,9 +281,10 @@ Meteor.publish('projectStats', async function projectStats(projectId) {
     return this.ready()
   }
   initialized = true
-  // Timecard changes become visible after the UI resubscribes. Avoiding an
-  // all-history observer keeps one project view from retaining every record.
-  await refresh()
+  // Timecard writes bump the private project revision, which triggers this
+  // bounded aggregate without retaining an observer over all historical rows.
+  aggregationGeneration += 1
+  await refreshQueue.request()
   if (stopped) return undefined
   return this.ready()
 })
@@ -381,5 +390,3 @@ Meteor.publish('dashboardProjectName', async function dashboardProjectName({ das
   reconcile()
   return this.ready()
 })
-
-

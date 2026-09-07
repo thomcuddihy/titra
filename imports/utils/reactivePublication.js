@@ -63,6 +63,49 @@ function applyObserverChange(documents, id, fields) {
 }
 
 /**
+ * Coalesce an arbitrary burst of refresh requests into at most one active run
+ * and one follow-up run. Requests arriving during the follow-up are folded into
+ * another pass, so the final snapshot always reflects the latest observed state.
+ */
+function createCoalescedAsyncRefresh(refresh) {
+  let inFlight
+  let pending = false
+  let stopped = false
+
+  async function drain() {
+    let firstError
+    do {
+      pending = false
+      try {
+        await refresh()
+      } catch (error) {
+        firstError ||= error
+      }
+    } while (pending && !stopped)
+    if (firstError) throw firstError
+  }
+
+  function request() {
+    if (stopped) return Promise.resolve()
+    pending = true
+    if (!inFlight) {
+      inFlight = drain().finally(() => {
+        inFlight = undefined
+      })
+    }
+    return inFlight
+  }
+
+  return {
+    request,
+    stop() {
+      stopped = true
+      pending = false
+    },
+  }
+}
+
+/**
  * Replace a Mongo observer when its authorization scope changes. A generation
  * token makes callbacks from stopped/replaced observers inert, while the old
  * snapshot remains available until the replacement has completed its initial
@@ -146,6 +189,7 @@ function createRestartableDocumentObserver({ cursorForScope, documentsChanged })
 export {
   applyObserverChange,
   changedPublicationFields,
+  createCoalescedAsyncRefresh,
   createPublicationReconciler,
   createRestartableDocumentObserver,
 }

@@ -27,6 +27,9 @@ import {
   forEachKeysetBatch,
   keysetSelector,
 } from './migrationStreaming.js'
+import {
+  runWithProjectStatsInvalidation,
+} from '../../projects/server/projectStatsInvalidation.js'
 
 /* eslint-disable no-await-in-loop, no-use-before-define, no-continue */
 
@@ -1470,6 +1473,7 @@ const applyBatch = new ValidatedMethod({
         'Verify the frozen backup before applying changes',
       )
     }
+    const affectedProjectIds = new Set()
     const lock = await acquireLease(runId, 'apply')
     try {
       const shouldRecheckIntegrity = !run.applyStartedAt
@@ -1547,6 +1551,7 @@ const applyBatch = new ValidatedMethod({
         if (!claimedBackup?._id) {
           continue
         }
+        affectedProjectIds.add(claimedBackup.original?.projectId)
         const wasRecoveringIntent = claimedBackup.status === 'applying-record'
         let status = 'failed'
         let errorMessage
@@ -1751,6 +1756,8 @@ const applyBatch = new ValidatedMethod({
       )
       await releaseLease(runId, lock.fence)
       throw error
+    } finally {
+      await runWithProjectStatsInvalidation(() => affectedProjectIds, async () => {})
     }
   },
 })
@@ -2180,6 +2187,7 @@ const restoreBatch = new ValidatedMethod({
     const normalizedBatchSize = boundedInteger(batchSize, 100, MAX_BATCH_SIZE)
     const run = await findRun(runId)
     assertRunStatus(run, RESTORE_BATCH_STATUSES)
+    const affectedProjectIds = new Set()
     const lock = await acquireLease(runId, 'restore')
     try {
       const shouldRecheckIntegrity = !run.restoreStartedAt
@@ -2256,6 +2264,7 @@ const restoreBatch = new ValidatedMethod({
         if (!claimedBackup?._id) {
           continue
         }
+        affectedProjectIds.add(claimedBackup.original?.projectId)
         const wasRecoveringIntent = claimedBackup.status === 'restoring-record'
         let status = 'restore-failed'
         let errorMessage
@@ -2460,6 +2469,8 @@ const restoreBatch = new ValidatedMethod({
       )
       await releaseLease(runId, lock.fence)
       throw error
+    } finally {
+      await runWithProjectStatsInvalidation(() => affectedProjectIds, async () => {})
     }
   },
 })

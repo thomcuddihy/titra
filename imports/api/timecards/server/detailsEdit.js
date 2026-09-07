@@ -94,6 +94,7 @@ async function editOwnedTimecardDetails({
 }, {
   findTimecard, canAccessProject, checkRule, assertUnlocked, withWriteLease,
   moveToProjectWithFence, updateOne,
+  withStatsInvalidation = (_projectIds, operation) => operation(),
 }) {
   const fields = validateTimecardDetailsEditBody(body)
   if (typeof timecardId !== 'string' || !timecardId || timecardId.length > 128
@@ -139,7 +140,7 @@ async function editOwnedTimecardDetails({
     )
   }
   await assertUnlocked()
-  return withWriteLease(async (assertWriterLease) => {
+  const performWrite = () => withWriteLease(async (assertWriterLease) => {
     if (!await canAccessProject(timecard.projectId, userId)
       || !await canAccessProject(candidate.projectId, userId)) {
       throw new TimecardDetailsEditError('not-authorized', 'Time entry not found.')
@@ -200,6 +201,12 @@ async function editOwnedTimecardDetails({
       ),
     }
   })
+  const affectsStats = changedFields.some(
+    (field) => ['projectId', 'hours', 'dateOnly'].includes(field),
+  )
+  return affectsStats
+    ? withStatsInvalidation([timecard.projectId, candidate.projectId], performWrite)
+    : performWrite()
 }
 
 export {

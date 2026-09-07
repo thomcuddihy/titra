@@ -59,7 +59,7 @@ export default defineConfig([
       'no-unexpected-multiline': 2,
 
       'no-underscore-dangle': ['error', {
-        allow: ['_id', '_loginStyle', '_redirectUri', '_stateParam'],
+        allow: ['_id', '_loginStyle', '_redirectUri', '_stateParam', '_statsRevision'],
       }],
 
       'no-throw-literal': 0,

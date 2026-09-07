@@ -73,6 +73,7 @@ import {
   createProjectChildWithFence,
   runWithProjectChildWriter,
 } from '../../projects/server/projectChildFence.js'
+import { runWithProjectStatsInvalidation } from '../../projects/server/projectStatsInvalidation.js'
 import {
   assertTimecardDateMigrationUnlocked,
   withTimecardDateWriteLease,
@@ -337,7 +338,7 @@ async function insertTimeCard(
   const updateTaskSuggestion = () => refreshTaskSuggestion(userId, taskName)
   if (!options.timecardId) await updateTaskSuggestion()
   const targetTimecardId = options.timecardId || Random.id()
-  const result = await withTimecardDateWriteLease(async () => createProjectChildWithFence({
+  const writeTimecard = () => withTimecardDateWriteLease(async () => createProjectChildWithFence({
     selector: await timecardProjectSelector(projectId, userId),
     projectId,
     reservationId: `timecard:${targetTimecardId}`,
@@ -354,6 +355,9 @@ async function insertTimeCard(
       _id: resourceId, projectId, userId,
     }),
   }, projectChildFenceDependencies))
+  const result = options.invalidateStats === false
+    ? await writeTimecard()
+    : await runWithProjectStatsInvalidation([projectId], writeTimecard)
   if (options.timecardId) {
     // Suggestions are a derived convenience. Updating them after the atomic
     // target insert lets a retry repair this side effect without duplicating
@@ -403,6 +407,7 @@ async function recoverAPITimeCard(
   // only safe way to confirm a write whose acknowledgement was lost.
   const recovered = await recoverCreatedDocument(Timecards, document, timecardId)
   if (!recovered) return null
+  await runWithProjectStatsInvalidation([projectId], async () => {})
   return { timecardId, created: false }
 }
 
@@ -464,7 +469,7 @@ async function insertIdempotentAPITimeCard(
  * @returns {String} 'notifications.success' if successful
  * @throws {Meteor.Error} If time entry rule fails.
  */
-async function upsertTimecard(projectId, task, date, hours, userId, dateOnly) {
+async function upsertTimecard(projectId, task, date, hours, userId, dateOnly, options = {}) {
   await assertTimecardDateMigrationUnlocked()
   const { dateFields, taskName, selector } = await buildWeekTimecardContext(
     projectId,
@@ -473,7 +478,7 @@ async function upsertTimecard(projectId, task, date, hours, userId, dateOnly) {
     userId,
     dateOnly,
   )
-  await withTimecardDateWriteLease(async (assertWriterLease) => {
+  const writeTimecard = () => withTimecardDateWriteLease(async (assertWriterLease) => {
     // Two rows are sufficient to prove this legacy week cell is ambiguous.
     const matchingTimecards = await Timecards.find(selector, {
       sort: { _id: 1 },
@@ -547,6 +552,8 @@ async function upsertTimecard(projectId, task, date, hours, userId, dateOnly) {
       }, projectChildFenceDependencies)
     }
   })
+  if (options.invalidateStats === false) await writeTimecard()
+  else await runWithProjectStatsInvalidation([projectId], writeTimecard)
   return 'notifications.success'
 }
 
@@ -696,16 +703,22 @@ const upsertWeek = new ValidatedMethod({
       dateOnly: element.dateOnly,
       hours: element.hours,
     })))
-    for (const element of weekArray) {
-      await upsertTimecard(
-        element.projectId,
-        element.task,
-        element.date,
-        element.hours,
-        this.userId,
-        element.dateOnly,
-      )
-    }
+    await runWithProjectStatsInvalidation(
+      weekArray.map((element) => element.projectId),
+      async () => {
+        for (const element of weekArray) {
+          await upsertTimecard(
+            element.projectId,
+            element.task,
+            element.date,
+            element.hours,
+            this.userId,
+            element.dateOnly,
+            { invalidateStats: false },
+          )
+        }
+      },
+    )
   },
 })
 /**
@@ -805,15 +818,16 @@ const updateTimeCard = new ValidatedMethod({
       modifier.$unset = { taskRate: '' }
     }
     await assertTimecardDateMigrationUnlocked()
-    const result = await withTimecardDateWriteLease(
-      async () => runWithProjectChildWriter({
+    const result = await runWithProjectStatsInvalidation(
+      [timecard.projectId, projectId],
+      () => withTimecardDateWriteLease(async () => runWithProjectChildWriter({
         selector: await timecardProjectSelector(projectId, targetUserId),
         projectId,
         reservationId: `timecard-update:${_id}:${Random.id()}`,
         kind: 'timecard-update',
         resourceId: _id,
         operation: () => Timecards.rawCollection().updateOne(updateSelector, modifier),
-      }, projectChildFenceDependencies),
+      }, projectChildFenceDependencies)),
     )
     assertTimecardWriteSucceeded(result)
   },
@@ -873,11 +887,14 @@ async function deleteOwnedTimeCard(timecardId, userId, expectedDateRevision) {
     )
   }
   await assertTimecardDateMigrationUnlocked()
-  const result = await withTimecardDateWriteLease(
-    () => Timecards.rawCollection().deleteOne({
-      ...timecardDateCompareAndSwapSelector(timecard),
-      userId,
-    }),
+  const result = await runWithProjectStatsInvalidation(
+    [timecard.projectId],
+    () => withTimecardDateWriteLease(
+      () => Timecards.rawCollection().deleteOne({
+        ...timecardDateCompareAndSwapSelector(timecard),
+        userId,
+      }),
+    ),
   )
   assertTimecardWriteSucceeded(result)
   return result.deletedCount
@@ -926,6 +943,7 @@ async function updateOwnedTimeCardDetails(options) {
       resourceId: options.timecardId,
       operation: write,
     }, projectChildFenceDependencies),
+    withStatsInvalidation: runWithProjectStatsInvalidation,
     updateOne: (selector, modifier) => Timecards.rawCollection().updateOne(selector, modifier),
   })
 }
@@ -1324,30 +1342,33 @@ const deleteTimeCardsForWeek = new ValidatedMethod({
       task,
       date: { $gte: startDate, $lte: endDate },
     }
-    await withTimecardDateWriteLease(async (assertWriterLease) => {
-      const matchingTimecards = await Timecards.find(selector, {
-        fields: {
-          date: 1, dateOnly: 1, startTime: 1, dateRevision: 1,
-        },
-        sort: { _id: 1 },
-        limit: MAX_WEEK_TIMECARD_RECORDS + 1,
-      }).fetchAsync()
-      assertResultWithinLimit(
-        matchingTimecards,
-        MAX_WEEK_TIMECARD_RECORDS,
-        'Week deletion',
-      )
-      for (const timecard of matchingTimecards) {
-        await assertWriterLease()
-        const result = await Timecards.rawCollection().deleteOne(
-          {
-            ...timecardDateCompareAndSwapSelector(timecard),
-            userId: this.userId,
+    await runWithProjectStatsInvalidation(
+      [projectId],
+      () => withTimecardDateWriteLease(async (assertWriterLease) => {
+        const matchingTimecards = await Timecards.find(selector, {
+          fields: {
+            date: 1, dateOnly: 1, startTime: 1, dateRevision: 1,
           },
+          sort: { _id: 1 },
+          limit: MAX_WEEK_TIMECARD_RECORDS + 1,
+        }).fetchAsync()
+        assertResultWithinLimit(
+          matchingTimecards,
+          MAX_WEEK_TIMECARD_RECORDS,
+          'Week deletion',
         )
-        assertTimecardWriteSucceeded(result)
-      }
-    })
+        for (const timecard of matchingTimecards) {
+          await assertWriterLease()
+          const result = await Timecards.rawCollection().deleteOne(
+            {
+              ...timecardDateCompareAndSwapSelector(timecard),
+              userId: this.userId,
+            },
+          )
+          assertTimecardWriteSucceeded(result)
+        }
+      }),
+    )
   },
 })
 
@@ -1688,23 +1709,29 @@ const bulkInsertTimecards = new ValidatedMethod({
         projectId, task, date, dateOnly, startTime, hours, customfields, userId,
       })
     }
-    for (const timecard of preparedTimecards) {
-      const {
-        projectId, task, date, dateOnly, startTime, hours, customfields, userId,
-      } = timecard
-      const timecardId = await insertTimeCard(
-        projectId,
-        task,
-        date,
-        hours,
-        userId,
-        null,
-        customfields,
-        dateOnly,
-        startTime,
-      )
-      insertedTimecards.push(timecardId)
-    }
+    await runWithProjectStatsInvalidation(
+      preparedTimecards.map((timecard) => timecard.projectId),
+      async () => {
+        for (const timecard of preparedTimecards) {
+          const {
+            projectId, task, date, dateOnly, startTime, hours, customfields, userId,
+          } = timecard
+          const timecardId = await insertTimeCard(
+            projectId,
+            task,
+            date,
+            hours,
+            userId,
+            null,
+            customfields,
+            dateOnly,
+            startTime,
+            { invalidateStats: false },
+          )
+          insertedTimecards.push(timecardId)
+        }
+      },
+    )
     return {
       success: true,
       message: `${insertedTimecards.length} timecards successfully inserted.`,

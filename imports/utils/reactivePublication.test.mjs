@@ -2,9 +2,50 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  createCoalescedAsyncRefresh,
   createPublicationReconciler,
   createRestartableDocumentObserver,
 } from './reactivePublication.js'
+
+test('async refreshes coalesce to one active and one latest follow-up run', async () => {
+  let releaseFirst
+  const firstRun = new Promise((resolve) => { releaseFirst = resolve })
+  let active = 0
+  let maximumActive = 0
+  let runs = 0
+  const refresh = createCoalescedAsyncRefresh(async () => {
+    runs += 1
+    active += 1
+    maximumActive = Math.max(maximumActive, active)
+    if (runs === 1) await firstRun
+    active -= 1
+  })
+
+  const initial = refresh.request()
+  refresh.request()
+  refresh.request()
+  releaseFirst()
+  await initial
+
+  assert.equal(runs, 2)
+  assert.equal(maximumActive, 1)
+})
+
+test('stopping an async refresh drops its pending follow-up', async () => {
+  let release
+  const blocked = new Promise((resolve) => { release = resolve })
+  let runs = 0
+  const refresh = createCoalescedAsyncRefresh(async () => {
+    runs += 1
+    await blocked
+  })
+  const initial = refresh.request()
+  refresh.request()
+  refresh.stop()
+  release()
+  await initial
+  assert.equal(runs, 1)
+})
 
 function publicationRecorder() {
   const events = []

@@ -29,6 +29,8 @@ const MEMBER_PROJECT_FIELDS = Object.freeze({
   projectRevision: 1,
 })
 
+const PRIVATE_PROJECT_FIELDS = new Set(['_statsRevision'])
+
 function projectMembershipSelector(userId) {
   return { $or: [{ userId }, { admins: userId }, { team: userId }] }
 }
@@ -44,7 +46,8 @@ function projectFields({ member, customFieldNames = [] }) {
   if (!member) return { ...PUBLIC_PROJECT_FIELDS }
   const fields = { ...MEMBER_PROJECT_FIELDS }
   customFieldNames.forEach((name) => {
-    if (typeof name === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(name)) fields[name] = 1
+    if (typeof name === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(name)
+      && !PRIVATE_PROJECT_FIELDS.has(name)) fields[name] = 1
   })
   return fields
 }
@@ -102,6 +105,7 @@ export {
   canViewProject,
   changedProjectFields,
   MEMBER_PROJECT_FIELDS,
+  PRIVATE_PROJECT_FIELDS,
   PUBLIC_PROJECT_FIELDS,
   projectFields,
   projectFieldsForCaller,
