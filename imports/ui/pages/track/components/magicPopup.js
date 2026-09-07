@@ -76,10 +76,14 @@ Template.magicPopup.onRendered(() => {
 Template.magicPopup.helpers({
   magicData: () => (Template.instance().magicData.get()?.length > 0
     ? Template.instance().magicData.get() : false),
-  renderProjectSelect: (projectId) => `<select class="form-control js-magic-project" required>
-    <option value="">${t('project.project_placeholder')}</option>
-    ${Projects.find({ $or: [{ archived: { $exists: false } }, { archived: false }] }).fetch().map((project) => (project._id === projectId ? `<option value="${project._id}" selected>${project.name}</option>` : `<option value="${project._id}">${project.name}</option>`)).join('')}
-  </select>`,
+  projectOptions: (projectId) => Projects.find(
+    { $or: [{ archived: { $exists: false } }, { archived: false }] },
+    { sort: { name: 1, _id: 1 } },
+  ).fetch().map((project) => ({
+    _id: project._id,
+    name: project.name,
+    selected: project._id === projectId,
+  })),
 })
 
 Template.magicPopup.events({
