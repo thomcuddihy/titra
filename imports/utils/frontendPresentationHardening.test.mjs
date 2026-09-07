@@ -17,6 +17,18 @@ test('audited user-content templates have no raw Spacebars HTML sinks', () => {
   ]) assert.doesNotMatch(source(relativePath), /\{\{\{/u, relativePath)
 })
 
+test('magic popup project choices use the escaped Spacebars option contract', () => {
+  const controller = source('imports/ui/pages/track/components/magicPopup.js')
+  const template = source('imports/ui/pages/track/components/magicPopup.html')
+
+  assert.match(controller, /projectOptions:\s*\(projectId\)\s*=>\s*Projects\.find\(/u)
+  assert.match(controller, /name:\s*project\.name/u)
+  assert.match(controller, /selected:\s*project\._id\s*===\s*projectId/u)
+  assert.doesNotMatch(controller, /renderProjectSelect|<option|<select/u)
+  assert.match(template, /\{\{#each project in projectOptions entry\.projectID\}\}/u)
+  assert.match(template, /\{\{project\.name\}\}/u)
+})
+
 test('remote changelog and legacy descriptions are converted to text', () => {
   const about = source('imports/ui/pages/about.js')
   assert.doesNotMatch(about, /\.html\s*\(/u)
