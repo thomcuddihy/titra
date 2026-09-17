@@ -10,6 +10,10 @@ import OutboundInterfaces from '../outboundinterfaces.js'
 import { checkAdminAuthentication } from '../../../utils/server_method_helpers.js'
 
 Meteor.publish('outboundinterfaces', async function getOutboundInterfaces() {
-  checkAdminAuthentication(this)
+  try {
+    await checkAdminAuthentication(this)
+  } catch (error) {
+    return this.ready()
+  }
   return OutboundInterfaces.find({})
 })

@@ -153,9 +153,11 @@ const updateProject = new ValidatedMethod({
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({ projectId, projectArray }) {
-    const updateJSON = {}
-    for (const projectAttribute of projectArray) {
-      updateJSON[projectAttribute.name] = projectAttribute.value
+    const updateJSON = buildSafePayload(Object.fromEntries(
+      projectArray.map((projectAttribute) => [projectAttribute.name, projectAttribute.value]),
+    ), projectAllowedFields)
+    if (!updateJSON.name) {
+      throw new Meteor.Error('error-project-name-required', 'Project name is required')
     }
     updateJSON.name = await emojify(updateJSON.name)
     if (!updateJSON.public) {
@@ -197,19 +199,21 @@ const createProject = new ValidatedMethod({
   },
   mixins: [authenticationMixin, transactionLogMixin],
   async run({ projectArray }) {
-    const updateJSON = {}
-    for (const projectAttribute of projectArray) {
-      updateJSON[projectAttribute.name] = projectAttribute.value
+    const updateJSON = buildSafePayload(Object.fromEntries(
+      projectArray.map((projectAttribute) => [projectAttribute.name, projectAttribute.value]),
+    ), projectAllowedFields)
+    if (!updateJSON.name) {
+      throw new Meteor.Error('error-project-name-required', 'Project name is required')
     }
     if (!updateJSON.public) {
       updateJSON.public = false
     } else {
       updateJSON.public = true
     }
-    if(updateJSON.startDate) {
+    if (updateJSON.startDate) {
       updateJSON.startDate = new Date(updateJSON.startDate)
     }
-    if(updateJSON.endDate) {
+    if (updateJSON.endDate) {
       updateJSON.endDate = new Date(updateJSON.endDate)
     }
     updateJSON.name = await emojify(updateJSON.name)

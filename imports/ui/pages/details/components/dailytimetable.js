@@ -2,10 +2,10 @@ import dayjs from 'dayjs'
 import utc from 'dayjs/plugin/utc'
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra'
 import { saveAs } from 'file-saver'
-import { NullXlsx } from '@neovici/nullxlsx/src/nullxlsx.js'
 import './dailytimetable.html'
 import './pagination.js'
 import './limitpicker.js'
+import { exportSheetToXlsx } from '../../../../utils/excelExport.js'
 import {
   getGlobalSetting,
   numberWithUserPrecision,
@@ -167,7 +167,7 @@ Template.dailytimetable.events({
     }
     saveAs(new Blob(csvArray, { type: 'text/csv;charset=utf-8;header=present' }), `titra_daily_time_${templateInstance.data.period.get()}.csv`)
   },
-  'click .js-export-xlsx': (event, templateInstance) => {
+  'click .js-export-xlsx': async (event, templateInstance) => {
     event.preventDefault()
     let unit = t('globals.hour_plural')
     if (Meteor.user()) {
@@ -184,7 +184,7 @@ Template.dailytimetable.events({
         data.push([dayjs.utc(timeEntry.date).format(getGlobalSetting('dateformat')), timeEntry.projectId, timeEntry.totalHours])
       }
     }
-    saveAs(new NullXlsx('temp.xlsx', { frozen: 1, filter: 1 }).addSheetFromData(data, 'daily').createDownloadUrl(), `titra_daily_time_${templateInstance.data.period.get()}.xlsx`)
+    await exportSheetToXlsx(data, 'daily', `titra_daily_time_${templateInstance.data.period.get()}.xlsx`)
   },
   'click .js-outbound-interface': (event, templateInstance) => {
     event.preventDefault()

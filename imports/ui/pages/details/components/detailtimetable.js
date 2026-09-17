@@ -3,9 +3,9 @@ import utc from 'dayjs/plugin/utc'
 import customParseFormat from 'dayjs/plugin/customParseFormat'
 import { saveAs } from 'file-saver'
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra'
-import { NullXlsx } from '@neovici/nullxlsx/src/nullxlsx.js'
 import { Modal } from 'bootstrap'
 import { i18nReady, t } from '../../../../utils/i18n.js'
+import { exportSheetToXlsx } from '../../../../utils/excelExport.js'
 import Timecards from '../../../../api/timecards/timecards'
 import CustomFields from '../../../../api/customfields/customfields'
 import {
@@ -530,7 +530,7 @@ Template.detailtimetable.events({
       }
     })
   },
-  'click .js-export-xlsx': (event, templateInstance) => {
+  'click .js-export-xlsx': async (event, templateInstance) => {
     event.preventDefault()
     const data = [[t('globals.project'), t('globals.date'), t('globals.task')]]
     if (getGlobalSetting('showResourceInDetails')) {
@@ -585,8 +585,9 @@ Template.detailtimetable.events({
       }
       data.push(row)
     }
-    saveAs(
-      new NullXlsx('temp.xlsx', { frozen: 1, filter: 1 }).addSheetFromData(data, 'titra export').createDownloadUrl(),
+    await exportSheetToXlsx(
+      data,
+      'titra export',
       `titra_export_${dayjs().format('YYYYMMDD-HHmm')}_${$('#resourceselect option:selected').text().replace(' ', '_').toLowerCase()}.xlsx`,
     )
     Meteor.call('setTimeEntriesState', { timeEntries: Timecards.find(selector, templateInstance.selector.get()[1]).fetch().map((entry) => entry._id), state: 'exported' }, (error) => {

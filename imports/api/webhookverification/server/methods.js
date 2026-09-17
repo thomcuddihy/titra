@@ -5,6 +5,7 @@ import {
   adminAuthenticationMixin, authenticationMixin, transactionLogMixin, getGlobalSettingAsync,
 } from '../../../utils/server_method_helpers'
 import WebhookVerification from '../webhookverification.js'
+import { normalizeDomain } from '../../../utils/domainHelpers.js'
 
 /**
  * Method for inserting a new webhook verification interface.
@@ -176,15 +177,32 @@ const processWebhookVerification = new ValidatedMethod({
     check(senderDomain, String)
   },
   async run({ _id, webhookData, senderDomain }) {
+    // This method is intentionally server-only. The public webhook route calls it
+    // from the server, but direct DDP/client invocation should never be accepted.
+    if (this.connection) {
+      throw new Meteor.Error('not-authorized', 'Webhook verification processing is restricted to server-side calls.')
+    }
+
+    const normalizedSenderDomain = normalizeDomain(senderDomain)
     const webhookInterface = await WebhookVerification.findOneAsync({ _id, active: true })
     
     if (!webhookInterface) {
       throw new Meteor.Error('Webhook verification interface not found or inactive')
     }
 
-    // Check if sender domain is allowed
-    const allowedDomains = webhookInterface.allowedDomains.split(',').map(d => d.trim())
-    if (!allowedDomains.includes(senderDomain)) {
+    // Check if sender domain is allowed after normalizing both values.
+    const allowedDomains = (webhookInterface.allowedDomains || '').split(',').map(d => normalizeDomain(d)).filter(Boolean)
+    const isAllowed = allowedDomains.some((allowed) => {
+      if (normalizedSenderDomain === allowed) return true
+      if (allowed === 'localhost' && (normalizedSenderDomain?.includes('localhost') || normalizedSenderDomain?.includes('127.0.0.1'))) return true
+      if (allowed?.startsWith('*.')) {
+        const domain = allowed.substring(2)
+        return normalizedSenderDomain === domain || normalizedSenderDomain?.endsWith(`.${domain}`)
+      }
+      return false
+    })
+
+    if (!isAllowed) {
       throw new Meteor.Error('Domain not whitelisted for webhook verification')
     }
 

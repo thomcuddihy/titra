@@ -1,3 +1,5 @@
+const DANGEROUS_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
+
 // Utility function for slug sanitization
 function sanitizeSlug(input) {
   if (!input || typeof input !== 'string') return ''
@@ -16,19 +18,41 @@ function sanitizeSlug(input) {
     .substring(0, 100)
 }
 
-function sanitizeObject(object, forbiddenKeys = new Set()) {
-  if (!object || typeof object !== 'object') {
+function buildSafePayload(payload, allowedKeys = null, forbiddenKeys = DANGEROUS_KEYS) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
     return {}
   }
 
-  const safeObject = {}
-  for (const [key, value] of Object.entries(object)) {
-    if (forbiddenKeys.has(key) || key === '__proto__' || key === 'constructor') {
+  const allowedKeySet = allowedKeys instanceof Set ? allowedKeys : new Set(allowedKeys || [])
+  const forbiddenKeySet = forbiddenKeys instanceof Set ? forbiddenKeys : new Set(forbiddenKeys || [])
+  const safePayload = {}
+
+  for (const [key, value] of Object.entries(payload)) {
+    if (forbiddenKeySet.has(key) || key === '__proto__' || key === 'prototype' || key === 'constructor') {
       continue
     }
-    safeObject[key] = value
+    if (allowedKeys && !allowedKeySet.has(key)) {
+      continue
+    }
+    if (Object.prototype.hasOwnProperty.call(safePayload, key)) {
+      continue
+    }
+    safePayload[key] = value
   }
-  return safeObject
+
+  return safePayload
 }
 
-export { sanitizeSlug, sanitizeObject }
+function sanitizeObject(object, forbiddenKeys = new Set()) {
+  if (!object || typeof object !== 'object' || Array.isArray(object)) {
+    return {}
+  }
+
+  return buildSafePayload(object, null, new Set([...DANGEROUS_KEYS, ...(forbiddenKeys || [])]))
+}
+
+export {
+  sanitizeSlug,
+  sanitizeObject,
+  buildSafePayload,
+}

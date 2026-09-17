@@ -9,6 +9,7 @@ import Projects from '../../projects/projects.js'
 import { t } from '../../../utils/i18n.js'
 import { emojify } from '../../../utils/frontend_helpers'
 import { sanitizeObject } from '../../../utils/sanitizer.js'
+import { timeEntryForbiddenCustomfieldKeys } from '../../../utils/securityFieldPolicies.js'
 import { timeInUserUnitAsync } from '../../../utils/periodHelpers.js'
 import {
   authenticationMixin,
@@ -22,10 +23,6 @@ import {
   calculateSimilarity,
 } from '../../../utils/server_method_helpers.js'
 import { getOpenAIResponse } from '../../../utils/openai/openai_server.js'
-
-const timeEntryForbiddenCustomfieldKeys = new Set([
-  '_id', 'userId', 'projectId', 'date', 'hours', 'task', 'taskRate', 'state', 'lastUsed', 'name', 'createdAt', 'updatedAt',
-])
 
 /**
  * Inserts a new timecard into the Timecards collection.

@@ -2,25 +2,16 @@ import { Match, check } from 'meteor/check'
 import { WebApp } from 'meteor/webapp'
 import { getJson } from './bodyparser'
 import { insertTimeCard } from '../imports/api/timecards/server/methods'
-import { sanitizeObject } from '../imports/utils/sanitizer.js'
+import { buildSafePayload, sanitizeObject } from '../imports/utils/sanitizer.js'
+import {
+  projectAllowedFields,
+  taskForbiddenCustomfieldKeys,
+  timeEntryForbiddenCustomfieldKeys,
+} from '../imports/utils/securityFieldPolicies.js'
 import Timecards from '../imports/api/timecards/timecards'
 import Projects from '../imports/api/projects/projects'
 import Tasks from '../imports/api/tasks/tasks'
-
-const taskForbiddenCustomfieldKeys = new Set([
-  '_id', 'projectId', 'name', 'start', 'end', 'estimatedHours', 'dependencies', 'isDefaultTask', 'userId', 'createdAt', 'updatedAt',
-])
-
-function normalizeDomain(host) {
-  if (!host) return null
-  // Remove port
-  let domain = host.split(':')[0]
-  // Convert to lowercase
-  domain = domain.toLowerCase()
-  // Remove protocol prefix
-  domain = domain.replace(/^https?:\/\//, '')
-  return domain
-}
+import { normalizeDomain } from '../imports/utils/domainHelpers.js'
 
 function sendResponse(res, statusCode, message, payload) {
   const response = {}
@@ -135,7 +126,8 @@ WebApp.handlers.use('/timeentry/create/', async (req, res) => {
     if (!project) {
       return
     }
-    const timecardId = await insertTimeCard(json.projectId, json.task, new Date(json.date), json.hours, meteorUser._id, json.taskRate, json.customfields)
+    const safeCustomfields = sanitizeObject(json.customfields, timeEntryForbiddenCustomfieldKeys)
+    const timecardId = await insertTimeCard(json.projectId, json.task, new Date(json.date), json.hours, meteorUser._id, json.taskRate, safeCustomfields)
     const payload = {}
     payload.timecardId = timecardId
     sendResponse(res, 200, 'Time entry created.', payload)
@@ -375,8 +367,9 @@ WebApp.handlers.use('/project/create/', async (req, res) => {
       sendResponse(res, 500, `Invalid parameters received.${error}`)
       return
     }
-    json.userId = meteorUser._id
-    const projectId = await Projects.insertAsync(json)
+    const safeProject = buildSafePayload(json, projectAllowedFields)
+    safeProject.userId = meteorUser._id
+    const projectId = await Projects.insertAsync(safeProject)
     const payload = {}
     payload.projectId = projectId
     sendResponse(res, 200, 'Project created.', payload)

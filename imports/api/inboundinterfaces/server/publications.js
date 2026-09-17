@@ -10,6 +10,10 @@ import { checkAdminAuthentication } from '../../../utils/server_method_helpers.j
  * @returns {Mongo.Cursor} The cursor containing the inbound interfaces.
  */
 Meteor.publish('inboundinterfaces', async function getInboundInterfaces() {
-  checkAdminAuthentication(this)
+  try {
+    await checkAdminAuthentication(this)
+  } catch (error) {
+    return this.ready()
+  }
   return InboundInterfaces.find({})
 })

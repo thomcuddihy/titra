@@ -2,8 +2,8 @@ import dayjs from 'dayjs'
 import utc from 'dayjs/plugin/utc'
 import { saveAs } from 'file-saver'
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra'
-import { NullXlsx } from '@neovici/nullxlsx/src/nullxlsx.js'
 import { i18nReady, t } from '../../../../utils/i18n.js'
+import { exportSheetToXlsx } from '../../../../utils/excelExport.js'
 import {
   addToolTipToTableCell,
   getGlobalSetting,
@@ -143,13 +143,13 @@ Template.workingtimetable.events({
     }
     saveAs(new Blob(csvArray, { type: 'text/csv;charset=utf-8;header=present' }), `titra_working_time_${templateInstance.data.period.get()}.csv`)
   },
-  'click .js-export-xlsx': (event, templateInstance) => {
+  'click .js-export-xlsx': async (event, templateInstance) => {
     event.preventDefault()
     const data = [[t('globals.date'), t('globals.resource'), t('details.startTime'), t('details.breakStartTime'), t('details.breakEndTime'), t('details.endTime'), t('details.totalTime'), t('details.regularWorkingTime'), t('details.regularWorkingTimeDifference')]]
     for (const timeEntry of templateInstance.workingTimeEntries.get()) {
       data.push([dayjs.utc(timeEntry.date).format(getGlobalSetting('dateformat')), timeEntry.resource, timeEntry.startTime, timeEntry.breakStartTime, timeEntry.breakEndTime, timeEntry.endTime, timeEntry.totalTime, timeEntry.regularWorkingTime, timeEntry.regularWorkingTimeDifference])
     }
-    saveAs(new NullXlsx('temp.xlsx', { frozen: 1, filter: 1 }).addSheetFromData(data, 'working time').createDownloadUrl(), `titra_working_time_${templateInstance.data.period.get()}.xlsx`)
+    await exportSheetToXlsx(data, 'working time', `titra_working_time_${templateInstance.data.period.get()}.xlsx`)
   },
 })
 Template.workingtimetable.onDestroyed(() => {

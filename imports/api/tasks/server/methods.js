@@ -2,11 +2,8 @@ import { ValidatedMethod } from 'meteor/mdg:validated-method'
 import { check, Match } from 'meteor/check'
 import Tasks from '../tasks.js'
 import { sanitizeObject } from '../../../utils/sanitizer.js'
+import { taskForbiddenCustomfieldKeys } from '../../../utils/securityFieldPolicies.js'
 import { authenticationMixin, transactionLogMixin } from '../../../utils/server_method_helpers.js'
-
-const taskForbiddenCustomfieldKeys = new Set([
-  '_id', 'projectId', 'name', 'start', 'end', 'estimatedHours', 'dependencies', 'isDefaultTask', 'userId', 'createdAt', 'updatedAt',
-])
 
 /**
 Inserts a new project task into the Tasks collection.
