@@ -28,6 +28,7 @@ Usage:
      --v5-ref IMAGE_REF --v5-id sha256:... \\
      --v6-ref IMAGE_REF --v6-id sha256:... --v6-config-id sha256:... \\
      --v6-archive FILE --mongo-archive FILE --mongo-metadata FILE \\
+     [--mongo-attestation-id sha256:...] \\
      [--previous-v7-ref IMAGE_REF --previous-v7-id sha256:... \\
       --previous-v7-config-id sha256:...] \\
      --expected-host-fqdn HOST --production-compose-file ABSOLUTE_PATH \\
@@ -44,6 +45,8 @@ All site identity, filesystem paths, predecessor images, and content-addressed
 image IDs are explicit inputs. The builder embeds those reviewed values into an
 immutable host-bound package; the repository contains no rendered site data.
 An optional --mongo-id must equal the Mongo metadata's portable config image ID.
+Supply --mongo-attestation-id only for an archive containing the exact reviewed
+outer OCI attestation. Without it, the archive must contain one runtime only.
 Generate the Mongo archive and metadata pair with build-v7-mongo-archive.sh;
 the release builder rechecks their schema, identities, and archive checksum.
 The release profile defaults to "hardened" and is embedded in both the exact
@@ -72,6 +75,7 @@ compose_bytes=''
 stock_ref=''
 stock_id=''
 mongo_id=''
+mongo_attestation_id='none'
 mongo_archive=''
 mongo_metadata=''
 v5_ref=''
@@ -124,6 +128,7 @@ while (( $# > 0 )); do
     --v6-id) v6_id=${2:-}; shift 2 ;;
     --v6-config-id) v6_config_id=${2:-}; shift 2 ;;
     --mongo-id) mongo_id=${2:-}; shift 2 ;;
+    --mongo-attestation-id) mongo_attestation_id=${2:-}; shift 2 ;;
     --mongo-archive) mongo_archive=${2:-}; shift 2 ;;
     --mongo-metadata) mongo_metadata=${2:-}; shift 2 ;;
     --v6-archive) v6_archive=${2:-}; shift 2 ;;
@@ -164,6 +169,8 @@ expected_candidate_tag="${titra_version}-${source_commit:0:12}-ctx${source_conte
 [[ ${candidate_ref##*:} == "$expected_candidate_tag" ]] ||
   die "--candidate-ref does not use the exact immutable v7 ${release_profile} tag."
 [[ $compose_sha =~ ^[0-9a-f]{64}$ ]] || die '--compose-sha256 is invalid.'
+[[ $mongo_attestation_id == none || $mongo_attestation_id =~ ^sha256:[0-9a-f]{64}$ ]] ||
+  die '--mongo-attestation-id must be an exact reviewed SHA-256 or none.'
 [[ $compose_bytes =~ ^[1-9][0-9]*$ ]] || die '--compose-bytes is invalid.'
 [[ $stock_ref =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$ ]] || die '--stock-ref is invalid.'
 [[ $v5_ref =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$ ]] || die '--v5-ref is invalid.'
@@ -392,6 +399,7 @@ python3 - "$stage" \
   '__V7_MONGO_TEST_IMAGE_ID__' "$metadata_mongo_test_id" \
   '__V7_MONGO_CONFIG_IMAGE_ID__' "$mongo_id" \
   '__V7_MONGO_SOURCE_DIGEST__' "$metadata_mongo_source_digest" \
+  '__V7_MONGO_ATTESTATION_MANIFEST_ID__' "$mongo_attestation_id" \
   '__V7_MONGO_IMAGE_ARCHIVE__' "$mongo_relative" \
   '__V7_SOURCE_COMMIT__' "$source_commit" \
   '__V7_SOURCE_CONTEXT_SHA256__' "$source_context_sha" \

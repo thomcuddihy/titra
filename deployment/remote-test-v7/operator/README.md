@@ -20,6 +20,11 @@ record, not in this repository.
    metadata together. Build and verify the candidate and predecessor archives.
 4. Build the otherwise offline release from those reviewed inputs, then
    independently run `verify-v7-release.sh` against it.
+   If the Mongo archive includes its reviewed outer OCI attestation, pass that
+   exact digest with `--mongo-attestation-id`. The manifest retains the pin;
+   verification requires exactly one runtime and that attestation, authenticates
+   their content addresses and subject relationship, and rejects any additional
+   saved image. Omit the option only for a single-runtime archive.
 5. Transfer only the generated console, bundle, and their two checksum sidecars
    to the configured incoming directory.
 6. Keep a separate, tested host-level backup outside the maintenance roots.

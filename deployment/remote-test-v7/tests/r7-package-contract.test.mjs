@@ -87,6 +87,7 @@ test('Mongo lab dependency is rendered from reviewed release inputs', () => {
   assert.match(manifest, /^MONGO_TEST_IMAGE_ID=[^\r\n]+$/m)
   assert.match(manifest, /^MONGO_CONFIG_IMAGE_ID=[^\r\n]+$/m)
   assert.match(manifest, /^MONGO_SOURCE_DIGEST=[^\r\n]+$/m)
+  assert.match(manifest, /^MONGO_ATTESTATION_MANIFEST_ID=[^\r\n]+$/m)
   assert.match(manifest, /^MONGO_IMAGE_ARCHIVE=[^\r\n]+$/m)
 })
 

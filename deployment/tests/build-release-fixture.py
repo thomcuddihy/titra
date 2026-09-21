@@ -17,6 +17,7 @@ from test_verify_docker_save_archive import (  # noqa: E402
     VERSION,
     build_oci_archive,
 )
+from verify_docker_save_archive import checked_json, scan_archive  # noqa: E402
 
 
 def sha256(path: Path) -> str:
@@ -26,6 +27,7 @@ def sha256(path: Path) -> str:
 def main() -> int:
     root = Path(sys.argv[1]).resolve()
     release_profile = sys.argv[2]
+    with_attestation = len(sys.argv) > 3 and sys.argv[3] == "with-attestation"
     candidate_reference = (
         f"local/titra-test:{VERSION}-{SOURCE_COMMIT[:12]}-"
         f"ctx{SOURCE_CONTEXT[:12]}-{release_profile}-amd64"
@@ -42,7 +44,15 @@ def main() -> int:
         predecessor, reference=predecessor_ref
     )
     mongo_ref = "mongo:test"
-    mongo_id, _, mongo_config_id = build_oci_archive(mongo, reference=mongo_ref)
+    mongo_id, mongo_manifest_id, mongo_config_id = build_oci_archive(
+        mongo, reference=mongo_ref, outer_attestation=with_attestation
+    )
+    mongo_attestation_id = "none"
+    if with_attestation:
+        mongo_id = mongo_manifest_id
+        _, metadata, _ = scan_archive(mongo)
+        index = checked_json(metadata["index.json"], "fixture index")
+        mongo_attestation_id = index["manifests"][1]["digest"]
 
     evidence = root / "evidence"
     evidence.mkdir()
@@ -79,7 +89,8 @@ def main() -> int:
         f"CANDIDATE_CONFIG_ID={candidate_config_id}\n"
         f"PREDECESSOR_REF={predecessor_ref}\n"
         f"PREDECESSOR_ID={predecessor_id}\n"
-        f"PREDECESSOR_CONFIG_ID={predecessor_config_id}\n",
+        f"PREDECESSOR_CONFIG_ID={predecessor_config_id}\n"
+        f"MONGO_ATTESTATION_ID={mongo_attestation_id}\n",
         encoding="utf-8",
     )
     return 0

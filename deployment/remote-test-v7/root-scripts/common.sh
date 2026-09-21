@@ -431,16 +431,16 @@ manifest_value() {
 validate_release_manifest() {
   local actual_keys expected_keys
   local package_release_id release_profile titra_version titra_image titra_id titra_config_id titra_archive
-  local mongo_image mongo_id mongo_config_id mongo_source_digest mongo_archive source_commit source_context_sha
+  local mongo_image mongo_id mongo_config_id mongo_source_digest mongo_attestation_id mongo_archive source_commit source_context_sha
   local evidence_directory evidence_sha
   local stock_image stock_id v5_image v5_id v6_image v6_id v6_config_id v6_archive
   local previous_v7_image previous_v7_id previous_v7_config_id
 
   require_secure_regular_file "$RELEASE_MANIFEST"
-  [[ $(awk 'END { print NR + 0 }' "$RELEASE_MANIFEST") == '28' ]] ||
-    die 'Release manifest must contain exactly twenty-eight records.'
+  [[ $(awk 'END { print NR + 0 }' "$RELEASE_MANIFEST") == '29' ]] ||
+    die 'Release manifest must contain exactly twenty-nine records.'
   actual_keys=$(awk -F= 'NF >= 2 { print $1 }' "$RELEASE_MANIFEST" | LC_ALL=C sort | paste -sd ',' -)
-  expected_keys='MONGO_CONFIG_IMAGE_ID,MONGO_IMAGE_ARCHIVE,MONGO_SOURCE_DIGEST,MONGO_TEST_IMAGE,MONGO_TEST_IMAGE_ID,PACKAGE_RELEASE_ID,PREVIOUS_V7_CONFIG_IMAGE_ID,PREVIOUS_V7_IMAGE,PREVIOUS_V7_IMAGE_ID,RELEASE_FORMAT,RELEASE_PROFILE,SOURCE_COMMIT,SOURCE_CONTEXT_SHA256,STOCK_IMAGE,STOCK_IMAGE_ID,TITRA_CONFIG_IMAGE_ID,TITRA_IMAGE_ARCHIVE,TITRA_IMAGE_EVIDENCE_DIRECTORY,TITRA_IMAGE_EVIDENCE_SHA256SUMS_SHA256,TITRA_TEST_IMAGE,TITRA_TEST_IMAGE_ID,TITRA_VERSION,V5_IMAGE,V5_IMAGE_ID,V6_CONFIG_IMAGE_ID,V6_IMAGE,V6_IMAGE_ARCHIVE,V6_IMAGE_ID'
+  expected_keys='MONGO_ATTESTATION_MANIFEST_ID,MONGO_CONFIG_IMAGE_ID,MONGO_IMAGE_ARCHIVE,MONGO_SOURCE_DIGEST,MONGO_TEST_IMAGE,MONGO_TEST_IMAGE_ID,PACKAGE_RELEASE_ID,PREVIOUS_V7_CONFIG_IMAGE_ID,PREVIOUS_V7_IMAGE,PREVIOUS_V7_IMAGE_ID,RELEASE_FORMAT,RELEASE_PROFILE,SOURCE_COMMIT,SOURCE_CONTEXT_SHA256,STOCK_IMAGE,STOCK_IMAGE_ID,TITRA_CONFIG_IMAGE_ID,TITRA_IMAGE_ARCHIVE,TITRA_IMAGE_EVIDENCE_DIRECTORY,TITRA_IMAGE_EVIDENCE_SHA256SUMS_SHA256,TITRA_TEST_IMAGE,TITRA_TEST_IMAGE_ID,TITRA_VERSION,V5_IMAGE,V5_IMAGE_ID,V6_CONFIG_IMAGE_ID,V6_IMAGE,V6_IMAGE_ARCHIVE,V6_IMAGE_ID'
   [[ $actual_keys == "$expected_keys" ]] ||
     die 'Release manifest has missing, duplicate, or unknown keys.'
   [[ $(manifest_value "$RELEASE_MANIFEST" RELEASE_FORMAT) == '7' ]] ||
@@ -459,6 +459,7 @@ validate_release_manifest() {
   mongo_id=$(manifest_value "$RELEASE_MANIFEST" MONGO_TEST_IMAGE_ID)
   mongo_config_id=$(manifest_value "$RELEASE_MANIFEST" MONGO_CONFIG_IMAGE_ID)
   mongo_source_digest=$(manifest_value "$RELEASE_MANIFEST" MONGO_SOURCE_DIGEST)
+  mongo_attestation_id=$(manifest_value "$RELEASE_MANIFEST" MONGO_ATTESTATION_MANIFEST_ID)
   mongo_archive=$(manifest_value "$RELEASE_MANIFEST" MONGO_IMAGE_ARCHIVE)
   source_commit=$(manifest_value "$RELEASE_MANIFEST" SOURCE_COMMIT)
   source_context_sha=$(manifest_value "$RELEASE_MANIFEST" SOURCE_CONTEXT_SHA256)
@@ -509,6 +510,8 @@ validate_release_manifest() {
   done
   [[ $mongo_source_digest =~ ^sha256:[0-9a-f]{64}$ ]] ||
     die 'Release Mongo source digest is invalid.'
+  [[ $mongo_attestation_id == none || $mongo_attestation_id =~ ^sha256:[0-9a-f]{64}$ ]] ||
+    die 'Release Mongo attestation identity is invalid.'
   [[ $source_commit =~ ^[0-9a-f]{40}$ ]] || die 'Release source commit is invalid.'
   [[ $source_context_sha =~ ^[0-9a-f]{64}$ ]] || die 'Release source-context digest is invalid.'
   [[ ${titra_image##*:} == "${titra_version}-${source_commit:0:12}-ctx${source_context_sha:0:12}-${release_profile}-amd64" ]] ||

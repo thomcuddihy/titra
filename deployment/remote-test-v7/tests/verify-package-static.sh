@@ -59,9 +59,9 @@ python3 "$PACKAGE_ROOT/tests/test_verify_docker_save_archive.py"
 bash "$PACKAGE_ROOT/tests/failure-rehearsal.sh"
 
 manifest="$PACKAGE_ROOT/manifest/release.env"
-[[ $(awk 'END {print NR + 0}' "$manifest") == 28 ]] || die 'R7 release manifest must contain 28 records.'
+[[ $(awk 'END {print NR + 0}' "$manifest") == 29 ]] || die 'R7 release manifest must contain 29 records.'
 actual_keys=$(awk -F= '{print $1}' "$manifest" | LC_ALL=C sort | paste -sd ',' -)
-expected_keys='MONGO_CONFIG_IMAGE_ID,MONGO_IMAGE_ARCHIVE,MONGO_SOURCE_DIGEST,MONGO_TEST_IMAGE,MONGO_TEST_IMAGE_ID,PACKAGE_RELEASE_ID,PREVIOUS_V7_CONFIG_IMAGE_ID,PREVIOUS_V7_IMAGE,PREVIOUS_V7_IMAGE_ID,RELEASE_FORMAT,RELEASE_PROFILE,SOURCE_COMMIT,SOURCE_CONTEXT_SHA256,STOCK_IMAGE,STOCK_IMAGE_ID,TITRA_CONFIG_IMAGE_ID,TITRA_IMAGE_ARCHIVE,TITRA_IMAGE_EVIDENCE_DIRECTORY,TITRA_IMAGE_EVIDENCE_SHA256SUMS_SHA256,TITRA_TEST_IMAGE,TITRA_TEST_IMAGE_ID,TITRA_VERSION,V5_IMAGE,V5_IMAGE_ID,V6_CONFIG_IMAGE_ID,V6_IMAGE,V6_IMAGE_ARCHIVE,V6_IMAGE_ID'
+expected_keys='MONGO_ATTESTATION_MANIFEST_ID,MONGO_CONFIG_IMAGE_ID,MONGO_IMAGE_ARCHIVE,MONGO_SOURCE_DIGEST,MONGO_TEST_IMAGE,MONGO_TEST_IMAGE_ID,PACKAGE_RELEASE_ID,PREVIOUS_V7_CONFIG_IMAGE_ID,PREVIOUS_V7_IMAGE,PREVIOUS_V7_IMAGE_ID,RELEASE_FORMAT,RELEASE_PROFILE,SOURCE_COMMIT,SOURCE_CONTEXT_SHA256,STOCK_IMAGE,STOCK_IMAGE_ID,TITRA_CONFIG_IMAGE_ID,TITRA_IMAGE_ARCHIVE,TITRA_IMAGE_EVIDENCE_DIRECTORY,TITRA_IMAGE_EVIDENCE_SHA256SUMS_SHA256,TITRA_TEST_IMAGE,TITRA_TEST_IMAGE_ID,TITRA_VERSION,V5_IMAGE,V5_IMAGE_ID,V6_CONFIG_IMAGE_ID,V6_IMAGE,V6_IMAGE_ARCHIVE,V6_IMAGE_ID'
 [[ $actual_keys == "$expected_keys" ]] || die 'R7 release manifest keys differ from the reviewed schema.'
 grep -Fx 'RELEASE_FORMAT=7' "$manifest" >/dev/null || die 'R7 release format is not 7.'
 manifest_value() {
@@ -87,6 +87,13 @@ if [[ $previous_ref != none || $previous_id != none || $previous_config_id != no
 fi
 [[ $(manifest_value MONGO_SOURCE_DIGEST) =~ ^sha256:[0-9a-f]{64}$ ]] ||
   die 'Manifest Mongo source digest is invalid.'
+mongo_attestation_id=$(manifest_value MONGO_ATTESTATION_MANIFEST_ID)
+mongo_attestation_args=()
+if [[ $mongo_attestation_id != none ]]; then
+  [[ $mongo_attestation_id =~ ^sha256:[0-9a-f]{64}$ ]] ||
+    die 'Manifest Mongo attestation identity is invalid.'
+  mongo_attestation_args=(--expected-attestation-id "$mongo_attestation_id")
+fi
 [[ $(manifest_value RELEASE_PROFILE) =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]] ||
   die 'Manifest release profile is invalid.'
 grep -E "^readonly EXPECTED_PROD_COMPOSE_SHA256='[0-9a-f]{64}'$" \
@@ -162,6 +169,7 @@ python3 "$PACKAGE_ROOT/tests/verify_docker_save_archive.py" \
   --expected-ref "$(manifest_value MONGO_TEST_IMAGE)" \
   --expected-id "$(manifest_value MONGO_TEST_IMAGE_ID)" \
   --expected-config-id "$(manifest_value MONGO_CONFIG_IMAGE_ID)" \
+  "${mongo_attestation_args[@]}" \
   --require-portable-candidate
 
 grep -F 'FULL ROLLBACK TITRA' "$PACKAGE_ROOT/root-scripts/rollback-production-candidate.sh" >/dev/null ||
