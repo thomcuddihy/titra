@@ -1,12 +1,12 @@
 {
   "name": "meteor",
-  "version": "3.5.1",
+  "version": "3.5.2",
   "lockfileVersion": 3,
   "requires": true,
   "packages": {
     "": {
       "name": "meteor",
-      "version": "3.5.1",
+      "version": "3.5.2",
       "dependencies": {
         "7zip-bin": "^5.2.0",
         "cli-progress": "^3.11.1",

@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs'
 import { isDeepStrictEqual } from 'node:util'
 import vm from 'node:vm'
 import test from 'node:test'
+import { sanitizeObject } from '../imports/utils/sanitizer.js'
+import { taskForbiddenCustomfieldKeys } from '../imports/utils/securityFieldPolicies.js'
 
 import {
   IdempotencyError,
@@ -619,7 +621,8 @@ function registeredRoutes() {
       },
     },
     getJson: async (req) => JSON.parse(req.rawBody),
-    sanitizeObject: (value) => value || {},
+    sanitizeObject,
+    taskForbiddenCustomfieldKeys,
     Projects: {
       findOneAsync: async () => {
         calls.projectReads += 1
@@ -869,6 +872,29 @@ test('completed project-task replay survives later admin and dependency denial',
   assert.equal(f.calls.projectReads, readsAfterCreate)
   assert.equal(f.calls.dependencyReads, dependenciesAfterCreate)
   assert.equal(f.calls.taskRecoveries, recoveriesAfterCreate)
+})
+
+test('real project-task create applies the shared customfield protections before persistence', async () => {
+  const f = registeredRoutes()
+  const request = keyedProjectTaskRequest()
+  const body = JSON.parse(request.rawBody)
+  body.customfields = JSON.parse(`{
+    "__proto__": {"polluted": true}, "constructor": "forged", "prototype": "forged",
+    "_id": "forged", "userId": "forged", "projectId": "forged",
+    "projectTaskRevision": 999, "isDefaultTask": true, "notes": "retained"
+  }`)
+  request.rawBody = JSON.stringify(body)
+  const response = rawResponse()
+  await f.handlers.get('/project/task/create/')(request, response)
+  assert.equal(response.replies[0].status, 200)
+  assert.equal(f.state.projectTasks.size, 1)
+  const [stored] = f.state.projectTasks.values()
+  assert.equal(stored.projectId, body.projectId)
+  assert.equal(stored.projectTaskRevision, 0)
+  assert.equal(stored.notes, 'retained')
+  for (const field of ['__proto__', 'constructor', 'prototype', '_id', 'userId', 'isDefaultTask']) {
+    assert.equal(Object.hasOwn(stored, field), false, field)
+  }
 })
 
 test('reserved committed timeentry is recovered before changed mutable guards', async () => {

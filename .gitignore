@@ -5,6 +5,7 @@ jsconfig.json
 
 # Local branch-splitting worktrees and test coverage
 /.worktrees/
+/.test-artifacts/
 .coverage
 .coverage.*
 **/.coverage.*
@@ -42,3 +43,6 @@ credentials/
 /deployment/remote-test-*/images/
 /deployment/**/*.tar
 /deployment/**/*.tar.gz
+# Meteor Modern-Tools build context directories
+*/build-assets*
+*/build-chunks*

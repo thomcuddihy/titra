@@ -1,4 +1,4 @@
-import { createContext, runInContext } from 'vm'
+import { createContext, runInContext, Script } from 'vm'
 import { setTimeout as nodeSetTimeout } from 'timers'
 import { Meteor } from 'meteor/meteor'
 
@@ -32,10 +32,13 @@ export function validateSandboxCode(code) {
     { pattern: /\bfork\s*\(/gi, description: 'process forking' },
     // Constructor and prototype manipulation
     { pattern: /\bconstructor\s*\.\s*constructor\b/gi, description: 'constructor chain access' },
+    { pattern: /(?:this|globalThis|global|window)\s*(?:\[\s*['"`]constructor['"`]\s*\]|\.\s*constructor|\[\s*['"`]process['"`]\s*\]|\.\s*process|\[\s*['"`]Function['"`]\s*\]|\.\s*Function)/gi, description: 'constructor/process access via property chaining' },
+    { pattern: /(?:constructor|Function|process|globalThis|require|module|Buffer)\s*(?:\[\s*['"`][^'"`]+['"`]\s*\]|\.\s*[A-Za-z_$][\w$]*)/gi, description: 'dynamic property access to sensitive globals' },
     { pattern: /\b__proto__\b/gi, description: 'prototype manipulation' },
     { pattern: /\bObject\s*\.\s*setPrototypeOf\b/gi, description: 'prototype manipulation' },
     { pattern: /\bFunction\s*\(\s*['"`]/gi, description: 'Function constructor' },
     { pattern: /\bnew\s+Function\s*\(/gi, description: 'new Function constructor' },
+    { pattern: /\b(?:Function|AsyncFunction)\s*\[\s*['"`]constructor['"`]\s*\]/gi, description: 'Function constructor via bracket access' },
     // Eval and code injection
     { pattern: /\beval\s*\(/gi, description: 'eval function' },
     { pattern: /\bsetTimeout\s*\(\s*['"`]/gi, description: 'setTimeout with string code' },
@@ -78,12 +81,11 @@ export function validateSandboxCode(code) {
       `Potentially malicious code patterns detected:\n${errorMessage}`,
     )
   }
-  // Validate the code can be parsed as valid JavaScript
+  // Validate the code can be parsed as valid JavaScript without executing it.
+  // Wrap the code in a function so valid rule bodies with `return` statements pass syntax validation.
   try {
-    // Use Function constructor in a safe way just for syntax validation
-    // We're not executing this, just checking if it parses
-    // eslint-disable-next-line no-new, no-new-func
-    new Function(code)
+    // eslint-disable-next-line no-new
+    new Script(`(function () {\n${code}\n})`)
   } catch (syntaxError) {
     throw new Meteor.Error(
       'syntax-error',
@@ -93,8 +95,9 @@ export function validateSandboxCode(code) {
 }
 
 /**
- * A native Node.js vm-based sandbox that replaces vm2's NodeVM functionality.
- * Provides secure execution of untrusted code with controlled context and timeouts.
+ * Compatibility runtime for explicitly enabled, trusted legacy scripts.
+ * Node's vm and the pattern checks are not a security boundary for untrusted code.
+ * Callers must retain legacyScriptDecision's default-deny execution policy.
  */
 export class NodeSandbox {
   constructor(options = {}) {
@@ -167,20 +170,18 @@ export class NodeSandbox {
   // eslint-disable-next-line class-methods-use-this
   createRequireFunction(allowedBuiltins) {
     return (moduleName) => {
-      // Allow the most commonly used and safe builtin modules
-      const safeBuiltins = [
-        'util', 'crypto', 'url', 'querystring', 'path', 'fs', 'buffer',
-        'stream', 'events', 'os', 'http', 'https', 'zlib', 'net',
-      ]
+      const safeBuiltins = new Set([
+        'util', 'crypto', 'url', 'querystring', 'path', 'buffer',
+        'stream', 'events', 'os', 'http', 'https', 'zlib', 'net', 'timers',
+      ])
 
       if (allowedBuiltins.includes('*')) {
-        // When '*' is specified, allow all safe builtins
-        if (safeBuiltins.includes(moduleName)) {
+        if (safeBuiltins.has(moduleName)) {
           // eslint-disable-next-line import/no-dynamic-require, global-require
           return require(moduleName)
         }
       } else if (allowedBuiltins.includes(moduleName)) {
-        if (safeBuiltins.includes(moduleName)) {
+        if (safeBuiltins.has(moduleName)) {
           // eslint-disable-next-line import/no-dynamic-require, global-require
           return require(moduleName)
         }

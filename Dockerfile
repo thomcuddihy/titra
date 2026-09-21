@@ -1,8 +1,8 @@
 FROM node:24.20.0@sha256:be23f54a88d34e8824c741b19b91064094f92c1c97b194144bfc8b50d67258e2 AS builder
 SHELL ["/bin/sh", "-euxc"]
-ARG METEOR_RELEASE=3.5.1
-ARG METEOR_INSTALLER_RELEASE=3.5
-ARG METEOR_INSTALLER_SHA512=sha512-nQC+Pk/xa81soxt7qTvtwg4vsrNMuwqsNjAemxBBm50u+fi/oArtrSqoQFccYjaA1tKnT/IAEHv+X+MYPrPukA==
+ARG METEOR_RELEASE=3.5.2
+ARG METEOR_INSTALLER_RELEASE=3.5.2
+ARG METEOR_INSTALLER_SHA512=sha512-IgZfhCbpglWZDpMtCq3nimXFnvNO6Lw7Y4gzhMxEEiQN5j9AjBHiRKjmHuzaXAExeybmQ9KVhvfgsKfrVajOLQ==
 ENV METEOR_ALLOW_SUPERUSER=true \
     npm_config_ignore_meteor_setup_exec_path=true \
     PATH=/root/.meteor:${PATH}
@@ -29,8 +29,7 @@ COPY package.json .
 COPY package-lock.json .
 COPY deployment/security-v7/eslint-build.config.mjs ./deployment/security-v7/
 COPY rspack.config.js .
-RUN meteor npm ci --no-audit \
-    && rm -rf node_modules/meteor-node-stubs/node_modules/qs
+RUN meteor npm ci --no-audit
 COPY public/ ./public/
 COPY server/ ./server/
 COPY client/ ./client/

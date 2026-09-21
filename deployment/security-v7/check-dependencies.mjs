@@ -43,10 +43,7 @@ for (const file of files) {
     if (!path || !metadata.version) continue
     const name = packageName(path)
     const floor = floors.get(name)
-    const bundledQs = file === 'package-lock.json'
-      && path === 'node_modules/meteor-node-stubs/node_modules/qs'
-      && metadata.inBundle === true
-    if (floor && !bundledQs) {
+    if (floor) {
       assert.ok(
         compareVersions(metadata.version, floor) >= 0,
         `${file}: ${path}@${metadata.version} is below the reviewed floor ${floor}`,

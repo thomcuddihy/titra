@@ -1,6 +1,6 @@
 {
   "name": "meteor",
-  "version": "3.5.1",
+  "version": "3.5.2",
   "private": true,
   "description": "Integrity-locked Meteor installer used only by the Titra image builder",
   "main": "install.js",

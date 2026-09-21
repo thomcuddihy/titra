@@ -17,7 +17,8 @@ test('Docker build inputs and Meteor release are pinned consistently', async () 
   const configured = dockerfile.match(/^ARG METEOR_RELEASE=([^\s]+)$/m)?.[1]
   assert.equal(`METEOR@${configured}`, meteorRelease.trim())
   assert.match(dockerfile, /tr -d '\\r\\n' < \.meteor\/release/)
-  assert.match(dockerfile, /^ARG METEOR_INSTALLER_RELEASE=3\.5$/m)
+  const installerRelease = dockerfile.match(/^ARG METEOR_INSTALLER_RELEASE=([^\s]+)$/m)?.[1]
+  assert.equal(installerRelease, configured)
   assert.match(dockerfile, /Meteor \$\{METEOR_INSTALLER_RELEASE\}/)
   assert.match(dockerfile, /Meteor \$\{METEOR_RELEASE\}/)
   assert.match(dockerfile, /^ARG METEOR_INSTALLER_SHA512=sha512-[A-Za-z0-9+/]+={0,2}$/m)
@@ -40,6 +41,32 @@ test('Docker build inputs and Meteor release are pinned consistently', async () 
   assert.match(dockerfile, /^CMD \["node", "bundle\/main\.js"\]$/m)
 })
 
+test('Meteor installer metadata matches the pinned bootstrap release and hardened lock', async () => {
+  const [dockerfile, manifest, lock] = await Promise.all([
+    text('Dockerfile'),
+    text('deployment/security-v7/runtime/meteor-installer/package.json').then(JSON.parse),
+    text('deployment/security-v7/runtime/meteor-installer/npm-shrinkwrap.json').then(JSON.parse),
+  ])
+  const configured = dockerfile.match(/^ARG METEOR_RELEASE=([^\s]+)$/m)?.[1]
+  assert.equal(manifest.version, configured)
+  assert.equal(lock.version, configured)
+  assert.equal(lock.packages[''].version, configured)
+  assert.deepEqual(lock.packages[''].dependencies, manifest.dependencies)
+  assert.equal(manifest.dependencies.tar, '7.5.22')
+  assert.equal(manifest.dependencies.tmp, '0.2.7')
+})
+
+test('Meteor node stubs no longer need a bundled qs security exception', async () => {
+  const [dockerfile, policy, lock] = await Promise.all([
+    text('Dockerfile'),
+    text('deployment/security-v7/check-dependencies.mjs'),
+    text('package-lock.json').then(JSON.parse),
+  ])
+  assert.equal(lock.packages['node_modules/meteor-node-stubs/node_modules/qs'].version, '6.16.0')
+  assert.doesNotMatch(dockerfile, /rm[^\n]*meteor-node-stubs\/node_modules\/qs/)
+  assert.doesNotMatch(policy, /bundledQs|!metadata\.inBundle/)
+})
+
 test('package and lock root metadata describe the same release', async () => {
   const [manifest, lock] = await Promise.all([
     text('package.json').then(JSON.parse),
@@ -49,6 +76,10 @@ test('package and lock root metadata describe the same release', async () => {
   assert.equal(lock.version, manifest.version)
   assert.equal(lock.packages[''].name, manifest.name)
   assert.equal(lock.packages[''].version, manifest.version)
+  assert.deepEqual(lock.packages[''].dependencies, manifest.dependencies)
+  assert.deepEqual(lock.packages[''].devDependencies, manifest.devDependencies)
+  assert.equal(manifest.meteor.autoInstallDeps, false,
+    'Meteor must not silently change the reviewed dependency lock during builds')
 })
 
 test('Meteor server runtime has a complete integrity-pinned shrinkwrap', async () => {

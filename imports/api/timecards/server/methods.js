@@ -13,6 +13,7 @@ import { refreshPersonalTaskSuggestion } from '../../tasks/server/taskSuggestion
 import { t } from '../../../utils/i18n.js'
 import { emojify } from '../../../utils/frontend_helpers'
 import { sanitizeObject } from '../../../utils/sanitizer.js'
+import { timeEntryForbiddenCustomfieldKeys } from '../../../utils/securityFieldPolicies.js'
 import { timeInUserUnitAsync } from '../../../utils/periodHelpers.js'
 import {
   authenticationMixin,
@@ -94,10 +95,6 @@ import { createActivePublicationGate } from '../../../utils/activePublicationGat
 
 /* eslint-disable no-await-in-loop */
 
-const timeEntryForbiddenCustomfieldKeys = new Set([
-  '_id', 'userId', 'projectId', 'date', 'dateOnly', 'startTime', 'dateRevision',
-  'hours', 'task', 'taskRate', 'state', 'lastUsed', 'name', 'createdAt', 'updatedAt',
-])
 const timecardDateFields = ['date', 'dateOnly', 'startTime', 'dateRevision']
 
 const projectChildFenceDependencies = {

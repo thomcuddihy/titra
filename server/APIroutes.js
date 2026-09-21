@@ -36,6 +36,7 @@ import {
   createTimerStopHandler,
 } from './timerRoutes.js'
 import { sanitizeObject } from '../imports/utils/sanitizer.js'
+import { taskForbiddenCustomfieldKeys } from '../imports/utils/securityFieldPolicies.js'
 import {
   authorizeAPIRequest,
   parseCanonicalUTCMillisecondTimestamp,
@@ -137,10 +138,6 @@ import {
   parseTimecardDateRevisionETag,
   timecardDateRevisionETag,
 } from '../imports/utils/timecardRevision.js'
-
-const taskForbiddenCustomfieldKeys = new Set([
-  '_id', 'projectId', 'name', 'start', 'end', 'estimatedHours', 'dependencies', 'isDefaultTask', 'userId', 'createdAt', 'updatedAt',
-])
 
 let idempotencyStore
 const apiRateLimits = createAPIRateLimits()

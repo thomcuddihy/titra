@@ -8,6 +8,7 @@ import { defaultSettings, Globalsettings } from '../../api/globalsettings/global
 import Projects from '../../api/projects/projects.js'
 import { getGlobalSettingAsync } from '../../utils/server_method_helpers.js'
 import { applyHttpSecurityHeaders } from '../../../server/httpSecurityHeaders.js'
+import { applyXlsxWorkerPolicy } from '../../../server/xlsxWorkerPolicy.js'
 import { oauthEncryptionConfigured } from '../../utils/oauthEncryptionPolicy.js'
 import {
   configuredCredentialExists,
@@ -21,6 +22,14 @@ import { perCallerDdpRule } from '../../utils/ddpRateLimitPolicy.js'
 
 WebApp.rawConnectHandlers.use((_request, response, next) => {
   applyHttpSecurityHeaders(response, process.env)
+  next()
+})
+
+// browser-policy-common registers its CSP middleware on WebApp.handlers during
+// package loading. Run after it, not in rawConnectHandlers (which is earlier).
+// fflate's large XLSX exports use blob workers; script-src stays unchanged.
+WebApp.handlers.use((_request, response, next) => {
+  applyXlsxWorkerPolicy(response)
   next()
 })
 

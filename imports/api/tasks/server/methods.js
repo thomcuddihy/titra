@@ -4,6 +4,7 @@ import Tasks from '../tasks.js'
 import Projects from '../../projects/projects.js'
 import Timecards from '../../timecards/timecards.js'
 import { sanitizeObject } from '../../../utils/sanitizer.js'
+import { taskForbiddenCustomfieldKeys } from '../../../utils/securityFieldPolicies.js'
 import { authenticationMixin, transactionLogMixin } from '../../../utils/server_method_helpers.js'
 import {
   createProjectChildWithFence,
@@ -12,10 +13,6 @@ import {
 } from '../../projects/server/projectChildFence.js'
 import { deleteProjectTaskWithFence, taskRecoveryFingerprint } from './taskGraphFence.js'
 import { isDefaultProjectTask } from '../../projects/server/ddpMutationGuards.js'
-
-const taskForbiddenCustomfieldKeys = new Set([
-  '_id', 'projectId', 'name', 'start', 'end', 'estimatedHours', 'dependencies', 'isDefaultTask', 'userId', 'createdAt', 'updatedAt',
-])
 
 async function requireProjectAdministrator(projectId, userId) {
   const project = await Projects.findOneAsync({
