@@ -434,12 +434,13 @@ validate_release_manifest() {
   local mongo_image mongo_id mongo_config_id mongo_source_digest mongo_archive source_commit source_context_sha
   local evidence_directory evidence_sha
   local stock_image stock_id v5_image v5_id v6_image v6_id v6_config_id v6_archive
+  local previous_v7_image previous_v7_id previous_v7_config_id
 
   require_secure_regular_file "$RELEASE_MANIFEST"
-  [[ $(awk 'END { print NR + 0 }' "$RELEASE_MANIFEST") == '25' ]] ||
-    die 'Release manifest must contain exactly twenty-five records.'
+  [[ $(awk 'END { print NR + 0 }' "$RELEASE_MANIFEST") == '28' ]] ||
+    die 'Release manifest must contain exactly twenty-eight records.'
   actual_keys=$(awk -F= 'NF >= 2 { print $1 }' "$RELEASE_MANIFEST" | LC_ALL=C sort | paste -sd ',' -)
-  expected_keys='MONGO_CONFIG_IMAGE_ID,MONGO_IMAGE_ARCHIVE,MONGO_SOURCE_DIGEST,MONGO_TEST_IMAGE,MONGO_TEST_IMAGE_ID,PACKAGE_RELEASE_ID,RELEASE_FORMAT,RELEASE_PROFILE,SOURCE_COMMIT,SOURCE_CONTEXT_SHA256,STOCK_IMAGE,STOCK_IMAGE_ID,TITRA_CONFIG_IMAGE_ID,TITRA_IMAGE_ARCHIVE,TITRA_IMAGE_EVIDENCE_DIRECTORY,TITRA_IMAGE_EVIDENCE_SHA256SUMS_SHA256,TITRA_TEST_IMAGE,TITRA_TEST_IMAGE_ID,TITRA_VERSION,V5_IMAGE,V5_IMAGE_ID,V6_CONFIG_IMAGE_ID,V6_IMAGE,V6_IMAGE_ARCHIVE,V6_IMAGE_ID'
+  expected_keys='MONGO_CONFIG_IMAGE_ID,MONGO_IMAGE_ARCHIVE,MONGO_SOURCE_DIGEST,MONGO_TEST_IMAGE,MONGO_TEST_IMAGE_ID,PACKAGE_RELEASE_ID,PREVIOUS_V7_CONFIG_IMAGE_ID,PREVIOUS_V7_IMAGE,PREVIOUS_V7_IMAGE_ID,RELEASE_FORMAT,RELEASE_PROFILE,SOURCE_COMMIT,SOURCE_CONTEXT_SHA256,STOCK_IMAGE,STOCK_IMAGE_ID,TITRA_CONFIG_IMAGE_ID,TITRA_IMAGE_ARCHIVE,TITRA_IMAGE_EVIDENCE_DIRECTORY,TITRA_IMAGE_EVIDENCE_SHA256SUMS_SHA256,TITRA_TEST_IMAGE,TITRA_TEST_IMAGE_ID,TITRA_VERSION,V5_IMAGE,V5_IMAGE_ID,V6_CONFIG_IMAGE_ID,V6_IMAGE,V6_IMAGE_ARCHIVE,V6_IMAGE_ID'
   [[ $actual_keys == "$expected_keys" ]] ||
     die 'Release manifest has missing, duplicate, or unknown keys.'
   [[ $(manifest_value "$RELEASE_MANIFEST" RELEASE_FORMAT) == '7' ]] ||
@@ -471,6 +472,9 @@ validate_release_manifest() {
   v6_id=$(manifest_value "$RELEASE_MANIFEST" V6_IMAGE_ID)
   v6_config_id=$(manifest_value "$RELEASE_MANIFEST" V6_CONFIG_IMAGE_ID)
   v6_archive=$(manifest_value "$RELEASE_MANIFEST" V6_IMAGE_ARCHIVE)
+  previous_v7_image=$(manifest_value "$RELEASE_MANIFEST" PREVIOUS_V7_IMAGE)
+  previous_v7_id=$(manifest_value "$RELEASE_MANIFEST" PREVIOUS_V7_IMAGE_ID)
+  previous_v7_config_id=$(manifest_value "$RELEASE_MANIFEST" PREVIOUS_V7_CONFIG_IMAGE_ID)
   [[ $package_release_id == '__V7_PACKAGE_RELEASE_ID__' ]] ||
     die 'Release manifest does not identify the reviewed maintenance-r7 package.'
   [[ $release_profile =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]] ||
@@ -489,6 +493,16 @@ validate_release_manifest() {
   for id in "$stock_id" "$v5_id" "$v6_id" "$v6_config_id"; do
     [[ $id =~ ^sha256:[0-9a-f]{64}$ ]] || die 'Supported source Titra image ID is invalid.'
   done
+  if [[ $previous_v7_image != none || $previous_v7_id != none || $previous_v7_config_id != none ]]; then
+    validate_safe_token 'previous-v7 Titra image reference' "$previous_v7_image"
+    [[ $previous_v7_image != none && $previous_v7_id =~ ^sha256:[0-9a-f]{64}$ &&
+      $previous_v7_config_id =~ ^sha256:[0-9a-f]{64}$ ]] ||
+      die 'Previous-v7 image admission must contain a complete exact identity or all none.'
+    for id in "$stock_id" "$v5_id" "$v6_id" "$v6_config_id" "$titra_id" "$titra_config_id"; do
+      [[ $id != "$previous_v7_id" && $id != "$previous_v7_config_id" ]] ||
+        die 'Previous-v7 identity overlaps another source generation or candidate.'
+    done
+  fi
   for archive in "$titra_archive" "$mongo_archive" "$v6_archive"; do
     [[ $archive =~ ^images/[A-Za-z0-9][A-Za-z0-9._-]*\.tar\.gz$ ]] ||
       die 'Release manifest contains an unsafe image archive path.'

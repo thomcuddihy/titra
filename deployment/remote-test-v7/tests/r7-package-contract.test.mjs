@@ -35,6 +35,8 @@ test('r7 source is site-neutral and recognizes all approved transition identitie
   assert.match(manifest, /^V5_IMAGE_ID=[^\r\n]+$/m)
   assert.match(manifest, /^V6_IMAGE_ID=[^\r\n]+$/m)
   assert.match(manifest, /^V6_CONFIG_IMAGE_ID=[^\r\n]+$/m)
+  assert.match(manifest, /^PREVIOUS_V7_IMAGE_ID=[^\r\n]+$/m)
+  assert.match(manifest, /^PREVIOUS_V7_CONFIG_IMAGE_ID=[^\r\n]+$/m)
 })
 
 test('installer replaces only exhaustively verified packages and has no incident repair exception', () => {
@@ -52,11 +54,11 @@ test('original production admission remains image-ID bound', () => {
   assert.doesNotMatch(deploy, /source_ref[^\n]*STOCK_IMAGE/)
 })
 
-test('only the four requested forward transitions are admitted', () => {
-  assert.match(transition, /stock:v7\|v5:v6\|v5:v7\|v6:v7/)
+test('only the approved generations and explicitly pinned previous-v7 update are admitted', () => {
+  assert.match(transition, /stock:v7\|v5:v6\|v5:v7\|v6:v7\|previous-v7:v7/)
   assert.match(preflight, /validate_transition "\$source_kind" "\$target"/)
   assert.match(deploy, /validate_transition "\$source_kind" "\$target"/)
-  assert.doesNotMatch(transition, /stock:v6|v6:v6|v7:v7/)
+  assert.doesNotMatch(transition, /stock:v6|v6:v6|\|v7:v7/)
 })
 
 test('image loading is local, checksum-bound, and never pulls or starts containers', () => {
@@ -65,8 +67,19 @@ test('image loading is local, checksum-bound, and never pulls or starts containe
   assert.match(loader, /docker image load --input "\$mongo_archive"/)
   assert.match(loader, /sha256sum --check --strict SHA256SUMS/)
   assert.doesNotMatch(loader, /docker (?:pull|run|start|compose)/)
-  assert.match(transition, /V7_LOADED_STATE="\$\{IMAGE_STATE_DIR\}\/loaded-v7[.]env"/)
+  assert.match(transition, /V7_LOADED_STATE="\$\{IMAGE_STATE_DIR\}\/loaded-v7-[^"\r\n]+[.]env"/)
   assert.doesNotMatch(transition, /v7\) printf[^\n]*LOADED_CANDIDATE_STATE/)
+})
+
+test('previous-v7 deploy checks the live runtime and rollback preserves v7 security settings in both recovery paths', () => {
+  assert.match(transition, /previous_v7_image_id_is_allowed/)
+  assert.match(transition, /admitted_id != none && \$admitted_config_id != none/)
+  assert.match(transition, /previous-v7\) printf 'v7\\n'/)
+  assert.match(preflight, /validate_previous_v7_source_environment "\$source_kind"/)
+  assert.equal((deploy.match(/validate_previous_v7_source_environment "\$source_kind"/g) || []).length, 2)
+  assert.equal((rollback.match(/source_override_kind=\$\(source_override_kind "\$source_kind"\)/g) || []).length, 2)
+  assert.match(common, /Previous-v7 identity overlaps another source generation or candidate/)
+  assert.match(rollback, /v7_runtime_fingerprint.*deployment_runtime_fingerprint/)
 })
 
 test('Mongo lab dependency is rendered from reviewed release inputs', () => {
@@ -84,6 +97,9 @@ test('v7 runtime key is generated once, hidden, and retained on configuration ch
   assert.match(runtime, /OAuth encryption key retained unchanged/)
   assert.match(runtime, /value hidden/)
   assert.doesNotMatch(status, /printf[^\n]*oauth_secret_key/)
+  assert.match(installer, /require_previous_v7_runtime_configuration/)
+  assert.match(installer, /no replacement key will be generated/)
+  assert.match(installer, /Previous-v7 runtime configuration disappeared; refusing to generate a replacement key/)
 })
 
 test('private integration hosts are exact and passed only to v7', () => {

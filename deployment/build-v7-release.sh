@@ -28,6 +28,8 @@ Usage:
      --v5-ref IMAGE_REF --v5-id sha256:... \\
      --v6-ref IMAGE_REF --v6-id sha256:... --v6-config-id sha256:... \\
      --v6-archive FILE --mongo-archive FILE --mongo-metadata FILE \\
+     [--previous-v7-ref IMAGE_REF --previous-v7-id sha256:... \\
+      --previous-v7-config-id sha256:...] \\
      --expected-host-fqdn HOST --production-compose-file ABSOLUTE_PATH \\
      --install-root ABSOLUTE_PATH --state-root ABSOLUTE_PATH \\
      --backup-root ABSOLUTE_PATH --lock-dir ABSOLUTE_PATH \\
@@ -47,6 +49,8 @@ the release builder rechecks their schema, identities, and archive checksum.
 The release profile defaults to "hardened" and is embedded in both the exact
 candidate tag and release manifest; set it explicitly for another reviewed
 build profile. It must be a safe lower-case Docker tag component.
+The optional previous-v7 inputs must be supplied together. They admit only that
+exact predecessor image for a v7-to-v7 update, retaining its existing OAuth key.
 The Node executable defaults to \$NODE_BIN, then to "node". A Windows node.exe
 path exposed through WSL is supported; test paths are translated with wslpath.
 EOF
@@ -76,6 +80,9 @@ v6_ref=''
 v6_id=''
 v6_config_id=''
 v6_archive=''
+previous_v7_ref='none'
+previous_v7_id='none'
+previous_v7_config_id='none'
 expected_host=''
 production_compose_file=''
 install_root=''
@@ -120,6 +127,9 @@ while (( $# > 0 )); do
     --mongo-archive) mongo_archive=${2:-}; shift 2 ;;
     --mongo-metadata) mongo_metadata=${2:-}; shift 2 ;;
     --v6-archive) v6_archive=${2:-}; shift 2 ;;
+    --previous-v7-ref) previous_v7_ref=${2:-}; shift 2 ;;
+    --previous-v7-id) previous_v7_id=${2:-}; shift 2 ;;
+    --previous-v7-config-id) previous_v7_config_id=${2:-}; shift 2 ;;
     --expected-host-fqdn) expected_host=${2:-}; shift 2 ;;
     --production-compose-file) production_compose_file=${2:-}; shift 2 ;;
     --install-root) install_root=${2:-}; shift 2 ;;
@@ -161,6 +171,16 @@ expected_candidate_tag="${titra_version}-${source_commit:0:12}-ctx${source_conte
 for image_id in "$stock_id" "$v5_id" "$v6_id" "$v6_config_id"; do
   [[ $image_id =~ ^sha256:[0-9a-f]{64}$ ]] || die 'A source image ID is invalid.'
 done
+if [[ $previous_v7_ref != none || $previous_v7_id != none || $previous_v7_config_id != none ]]; then
+  [[ $previous_v7_ref =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$ && $previous_v7_ref != none &&
+    $previous_v7_id =~ ^sha256:[0-9a-f]{64}$ &&
+    $previous_v7_config_id =~ ^sha256:[0-9a-f]{64}$ ]] ||
+    die 'All three previous-v7 identity arguments must be supplied together and valid.'
+  for image_id in "$stock_id" "$v5_id" "$v6_id" "$v6_config_id" "$candidate_id" "$candidate_config_id"; do
+    [[ $image_id != "$previous_v7_id" && $image_id != "$previous_v7_config_id" ]] ||
+      die 'Previous-v7 image identity overlaps another source generation or the candidate.'
+  done
+fi
 [[ $expected_host =~ ^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$ && $expected_host != *'..'* ]] ||
   die '--expected-host-fqdn is invalid.'
 validate_absolute_path() {
@@ -384,6 +404,9 @@ python3 - "$stage" \
   '__V7_V6_IMAGE_ID__' "$v6_id" \
   '__V7_V6_CONFIG_IMAGE_ID__' "$v6_config_id" \
   '__V7_V6_IMAGE_ARCHIVE__' "$v6_relative" \
+  '__V7_PREVIOUS_V7_IMAGE__' "$previous_v7_ref" \
+  '__V7_PREVIOUS_V7_IMAGE_ID__' "$previous_v7_id" \
+  '__V7_PREVIOUS_V7_CONFIG_IMAGE_ID__' "$previous_v7_config_id" \
   '__V7_PROD_COMPOSE_SHA256__' "$compose_sha" \
   '__V7_PROD_COMPOSE_BYTES__' "$compose_bytes" \
   '__V7_EXPECTED_HOST_FQDN__' "$expected_host" \

@@ -1,7 +1,7 @@
 'use strict'
 
 /*
- * Read-only, count-only upgrade compatibility inventory for a pre-v7 Titra
+ * Read-only, count-only upgrade compatibility output for a Titra
  * database.  This file is executed directly by mongosh and is also a CommonJS
  * module so its policy and redaction behavior can be unit tested offline.
  *
@@ -1551,12 +1551,65 @@ function settingTruthy(collection, name) {
   return documents.some((document) => Boolean(document?.value))
 }
 
-function inspectCredentials(database) {
+function canonicalBase64(value, minimumBytes, maximumBytes) {
+  if (typeof value !== 'string' || value.length > Math.ceil(maximumBytes / 3) * 4
+    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/u.test(value)) {
+    return false
+  }
+  const bytes = Buffer.from(value, 'base64')
+  return bytes.length >= minimumBytes && bytes.length <= maximumBytes
+    && bytes.toString('base64') === value
+}
+
+// This is deliberately stricter than Meteor's isSealed shape predicate. The
+// reviewed oauth-encryption package stores AES-128-GCM with a 12-byte IV and
+// 16-byte tag. All credential paths below are opened without a userId by this
+// application, so the authenticated plaintext must contain only string data.
+// Returning a boolean prevents plaintext, keys, or crypto diagnostics leaking
+// into the fixed-schema compatibility output.
+function validSealedCredential(value, key, path) {
+  let plaintext
+  try {
+    if (!plainObject(value) || Object.keys(value).sort().join(',')
+      !== 'algorithm,authTag,ciphertext,iv' || value.algorithm !== 'aes-128-gcm'
+      || !canonicalBase64(key, 16, 16)
+      || !canonicalBase64(value.iv, 12, 12)
+      || !canonicalBase64(value.authTag, 16, 16)
+      // JSON escaping can expand every plaintext byte sixfold.
+      || !canonicalBase64(value.ciphertext, 1, credentialPlaintextLimit(path) * 6 + 64)) {
+      return false
+    }
+    const decipher = require('crypto').createDecipheriv(
+      'aes-128-gcm', Buffer.from(key, 'base64'), Buffer.from(value.iv, 'base64'),
+    )
+    decipher.setAAD(Buffer.alloc(0))
+    decipher.setAuthTag(Buffer.from(value.authTag, 'base64'))
+    plaintext = Buffer.concat([
+      decipher.update(Buffer.from(value.ciphertext, 'base64')), decipher.final(),
+    ])
+    const text = plaintext.toString('utf8')
+    if (!Buffer.from(text, 'utf8').equals(plaintext)) return false
+    const payload = JSON.parse(text)
+    return plainObject(payload) && Object.keys(payload).join(',') === 'data'
+      && typeof payload.data === 'string' && wellFormedString(payload.data)
+      && Buffer.byteLength(payload.data, 'utf8') <= credentialPlaintextLimit(path)
+  } catch {
+    return false
+  } finally {
+    if (plaintext) plaintext.fill(0)
+  }
+}
+
+function inspectCredentials(database, { credentialKey } = {}) {
+  if (credentialKey !== undefined && !canonicalBase64(credentialKey, 16, 16)) {
+    throw new TypeError('Invalid compatibility credential key')
+  }
   let plaintextFields = 0
   let malformedFields = 0
   let objectFields = 0
   let oversizedPlaintextFields = 0
   let candidateDocuments = 0
+  let inspectedObjects = 0
   for (const store of CREDENTIAL_STORES) {
     const collection = database.getCollection(store.collection)
     const stringConditions = []
@@ -1569,11 +1622,29 @@ function inspectCredentials(database) {
       )
       plaintextFields = safeAdd(plaintextFields, collectionCount(collection, plaintextSelector))
       malformedFields = safeAdd(malformedFields, collectionCount(collection, malformedSelector))
-      objectFields = safeAdd(objectFields, collectionCount(collection, objectSelector))
+      const objects = collectionCount(collection, objectSelector)
+      objectFields = safeAdd(objectFields, objects)
+      // Legacy sources still block every object. Only the protected wrapper
+      // can pass the key after proving the exact previous-v7 image/environment.
+      if (credentialKey !== undefined && objects > 0
+        && inspectedObjects + objects <= MAX_CREDENTIAL_CANDIDATE_DOCUMENTS) {
+        const documents = collection.find(objectSelector, { _id: 0, [path]: 1 })
+          .sort({ _id: 1 }).limit(MAX_CREDENTIAL_CANDIDATE_DOCUMENTS + 1)
+          .maxTimeMS(QUERY_TIMEOUT_MS).toArray()
+        if (!Array.isArray(documents) || documents.length !== objects) {
+          throw new TypeError('Credential count changed during compatibility probe')
+        }
+        inspectedObjects += objects
+        for (const document of documents) {
+          const value = path.split('.').reduce((current, name) => current?.[name], document)
+          if (validSealedCredential(value, credentialKey, path)) objectFields -= 1
+        }
+      }
       oversizedPlaintextFields = safeAdd(
         oversizedPlaintextFields, collectionCount(collection, oversizedSelector),
       )
       stringConditions.push(exactType(path, 'string'))
+      if (credentialKey !== undefined) stringConditions.push(exactType(path, 'object'))
     }
     const candidateSelector = mergeSelector(store.selector, { $or: stringConditions })
     candidateDocuments = safeAdd(
@@ -1986,7 +2057,7 @@ function marker(status, counts) {
     + COUNT_FIELDS.map((field) => ` ${field}=${counts[field]}`).join('')
 }
 
-function inspectDatabase(database, now = new Date()) {
+function inspectDatabase(database, now = new Date(), options = {}) {
   if (!database || typeof database.getCollection !== 'function') {
     throw new TypeError('A Mongo database handle is required')
   }
@@ -2160,7 +2231,7 @@ function inspectDatabase(database, now = new Date()) {
     }),
     ...inspectMigrationState(database),
     ...inspectTimeRule(globalsettings),
-    ...inspectCredentials(database),
+    ...inspectCredentials(database, options),
     ...inspectApiTokens(users, collectionIndexes(database, 'users')),
     ...inspectOidc(globalsettings, serviceConfigurations),
     ...inspectIntegrations(users, projects),
@@ -2168,12 +2239,12 @@ function inspectDatabase(database, now = new Date()) {
   return validateCounts(counts)
 }
 
-function runMongosh(database, printLine, quitProcess) {
+function runMongosh(database, printLine, quitProcess, options = {}) {
   let status = 'ERROR'
   let counts = emptyCounts(1)
   let exitStatus = 43
   try {
-    counts = inspectDatabase(database)
+    counts = inspectDatabase(database, new Date(), options)
     status = summaryStatus(counts)
     exitStatus = status === 'BLOCK' ? 42 : 0
   } catch {
@@ -2190,7 +2261,9 @@ if (typeof module === 'object' && module?.exports
     inspectDatabase,
   }
 } else if (typeof db !== 'undefined' && typeof print === 'function' && typeof quit === 'function') {
-  runMongosh(db, print, quit)
+  const credentialKey = globalThis.TITRA_V7_PREFLIGHT_CREDENTIAL_KEY
+  delete globalThis.TITRA_V7_PREFLIGHT_CREDENTIAL_KEY
+  runMongosh(db, print, quit, { credentialKey })
 } else if (typeof module === 'object' && module?.exports) {
   module.exports = {
     API_TOKEN_INDEX,
@@ -2222,6 +2295,7 @@ if (typeof module === 'object' && module?.exports
     WEBHOOK_INDEX,
     WEBHOOK_RECEIPT_INDEX,
     collectionIndexes,
+    canonicalBase64,
     configuredValueExpression,
     credentialPlaintextLimit,
     dashboardCustomRangePipeline,
@@ -2273,6 +2347,7 @@ if (typeof module === 'object' && module?.exports
     validOidcEndpoint,
     validOidcScopes,
     validRuntimeWebhookConfiguration,
+    validSealedCredential,
     validStoredOidcConfiguration,
     validWebhookMappingRules,
     verificationMalformedFlagsPipeline,

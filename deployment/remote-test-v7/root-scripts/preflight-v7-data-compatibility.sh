@@ -11,6 +11,8 @@ umask 077
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 # shellcheck source=common.sh
 source "${SCRIPT_DIR}/common.sh"
+# shellcheck source=v7-transition.sh
+source "${SCRIPT_DIR}/v7-transition.sh"
 
 usage() {
   cat <<EOF
@@ -25,8 +27,9 @@ Titra application remains available.
 under an inherited exclusive operator lock and requires the exact production
 Titra container to remain stopped while MongoDB stays running.
 
-The check reads counts only, never changes MongoDB, and never prints persisted
-values, document IDs, URLs, scripts, credentials, or database error text.
+The check never changes MongoDB and outputs counts only. For a pinned previous-v7
+source it also authenticates sealed credentials in memory with the retained
+key. Persisted values, IDs, URLs, scripts, credentials and raw errors are hidden.
 EOF
 }
 
@@ -71,6 +74,12 @@ require_command mktemp
   die 'Production MongoDB must be running for the v7 data-compatibility preflight.'
 
 expected_app_container=$(container_value "$APP_CONTAINER" '{{.Id}}')
+expected_app_image=$(container_value "$APP_CONTAINER" '{{.Image}}')
+credential_key=''
+if previous_v7_image_id_is_allowed "$expected_app_image"; then
+  validate_previous_v7_source_environment previous-v7
+  credential_key=$(manifest_value "$V7_RUNTIME_CONFIG" oauth_secret_key)
+fi
 if [[ $mode == 'stopped' ]]; then
   [[ $LOCK_INHERITED == true ]] ||
     die 'The stopped data-compatibility preflight requires the inherited exclusive operator lock.'
@@ -175,6 +184,7 @@ marker_pattern+='$'
 mongo_before=$(mongo_identity_snapshot)
 output_file=$(mktemp --tmpdir=/run 'titra-v7-data-compatibility.XXXXXXXX')
 cleanup() {
+  unset credential_key
   rm -f -- "$output_file"
 }
 trap cleanup EXIT
@@ -184,13 +194,26 @@ trap 'exit 129' HUP
 chmod 0600 -- "$output_file"
 
 set +e
-docker exec --interactive "$DB_CONTAINER" \
+{
+  # Shell builtin printf sends the key only through the anonymous stdin pipe:
+  # never Docker arguments/environment, files, console output, or support logs.
+  if [[ -n $credential_key ]]; then
+    printf 'globalThis.TITRA_V7_PREFLIGHT_CREDENTIAL_KEY = "%s";\n' "$credential_key"
+  fi
+  cat -- "$probe"
+} | docker exec --interactive "$DB_CONTAINER" \
   mongosh "$PROD_DATABASE" --quiet --norc --file /dev/stdin \
-  < "$probe" > "$output_file" 2>&1
+  > "$output_file" 2>&1
 mongo_status=$?
 set -e
+unset credential_key
 
 assert_mongo_identity "$mongo_before" 'after the v7 data-compatibility preflight'
+[[ $(container_value "$APP_CONTAINER" '{{.Image}}') == "$expected_app_image" ]] ||
+  die 'Production application image changed during the compatibility preflight.'
+if previous_v7_image_id_is_allowed "$expected_app_image"; then
+  validate_previous_v7_source_environment previous-v7
+fi
 if [[ $mode == 'stopped' ]]; then
   assert_exact_app_stopped "$expected_app_container"
 else

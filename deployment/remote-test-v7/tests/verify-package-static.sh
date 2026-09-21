@@ -59,9 +59,9 @@ python3 "$PACKAGE_ROOT/tests/test_verify_docker_save_archive.py"
 bash "$PACKAGE_ROOT/tests/failure-rehearsal.sh"
 
 manifest="$PACKAGE_ROOT/manifest/release.env"
-[[ $(awk 'END {print NR + 0}' "$manifest") == 25 ]] || die 'R7 release manifest must contain 25 records.'
+[[ $(awk 'END {print NR + 0}' "$manifest") == 28 ]] || die 'R7 release manifest must contain 28 records.'
 actual_keys=$(awk -F= '{print $1}' "$manifest" | LC_ALL=C sort | paste -sd ',' -)
-expected_keys='MONGO_CONFIG_IMAGE_ID,MONGO_IMAGE_ARCHIVE,MONGO_SOURCE_DIGEST,MONGO_TEST_IMAGE,MONGO_TEST_IMAGE_ID,PACKAGE_RELEASE_ID,RELEASE_FORMAT,RELEASE_PROFILE,SOURCE_COMMIT,SOURCE_CONTEXT_SHA256,STOCK_IMAGE,STOCK_IMAGE_ID,TITRA_CONFIG_IMAGE_ID,TITRA_IMAGE_ARCHIVE,TITRA_IMAGE_EVIDENCE_DIRECTORY,TITRA_IMAGE_EVIDENCE_SHA256SUMS_SHA256,TITRA_TEST_IMAGE,TITRA_TEST_IMAGE_ID,TITRA_VERSION,V5_IMAGE,V5_IMAGE_ID,V6_CONFIG_IMAGE_ID,V6_IMAGE,V6_IMAGE_ARCHIVE,V6_IMAGE_ID'
+expected_keys='MONGO_CONFIG_IMAGE_ID,MONGO_IMAGE_ARCHIVE,MONGO_SOURCE_DIGEST,MONGO_TEST_IMAGE,MONGO_TEST_IMAGE_ID,PACKAGE_RELEASE_ID,PREVIOUS_V7_CONFIG_IMAGE_ID,PREVIOUS_V7_IMAGE,PREVIOUS_V7_IMAGE_ID,RELEASE_FORMAT,RELEASE_PROFILE,SOURCE_COMMIT,SOURCE_CONTEXT_SHA256,STOCK_IMAGE,STOCK_IMAGE_ID,TITRA_CONFIG_IMAGE_ID,TITRA_IMAGE_ARCHIVE,TITRA_IMAGE_EVIDENCE_DIRECTORY,TITRA_IMAGE_EVIDENCE_SHA256SUMS_SHA256,TITRA_TEST_IMAGE,TITRA_TEST_IMAGE_ID,TITRA_VERSION,V5_IMAGE,V5_IMAGE_ID,V6_CONFIG_IMAGE_ID,V6_IMAGE,V6_IMAGE_ARCHIVE,V6_IMAGE_ID'
 [[ $actual_keys == "$expected_keys" ]] || die 'R7 release manifest keys differ from the reviewed schema.'
 grep -Fx 'RELEASE_FORMAT=7' "$manifest" >/dev/null || die 'R7 release format is not 7.'
 manifest_value() {
@@ -72,6 +72,19 @@ manifest_value() {
 for key in TITRA_TEST_IMAGE_ID TITRA_CONFIG_IMAGE_ID STOCK_IMAGE_ID V5_IMAGE_ID V6_IMAGE_ID V6_CONFIG_IMAGE_ID MONGO_TEST_IMAGE_ID MONGO_CONFIG_IMAGE_ID; do
   [[ $(manifest_value "$key") =~ ^sha256:[0-9a-f]{64}$ ]] || die "Manifest ${key} is invalid."
 done
+previous_ref=$(manifest_value PREVIOUS_V7_IMAGE)
+previous_id=$(manifest_value PREVIOUS_V7_IMAGE_ID)
+previous_config_id=$(manifest_value PREVIOUS_V7_CONFIG_IMAGE_ID)
+if [[ $previous_ref != none || $previous_id != none || $previous_config_id != none ]]; then
+  [[ $previous_ref =~ ^[A-Za-z0-9][A-Za-z0-9._/:@-]{0,254}$ && $previous_ref != none &&
+    $previous_id =~ ^sha256:[0-9a-f]{64}$ && $previous_config_id =~ ^sha256:[0-9a-f]{64}$ ]] ||
+    die 'Previous-v7 admission must be complete and valid or all none.'
+  for key in TITRA_TEST_IMAGE_ID TITRA_CONFIG_IMAGE_ID STOCK_IMAGE_ID V5_IMAGE_ID V6_IMAGE_ID V6_CONFIG_IMAGE_ID; do
+    admitted=$(manifest_value "$key")
+    [[ $admitted != "$previous_id" && $admitted != "$previous_config_id" ]] ||
+      die 'Previous-v7 identity overlaps another generation or candidate.'
+  done
+fi
 [[ $(manifest_value MONGO_SOURCE_DIGEST) =~ ^sha256:[0-9a-f]{64}$ ]] ||
   die 'Manifest Mongo source digest is invalid.'
 [[ $(manifest_value RELEASE_PROFILE) =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]] ||

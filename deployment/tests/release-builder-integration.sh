@@ -22,6 +22,16 @@ python3 "${SCRIPT_DIR}/build-release-fixture.py" "${fixture_root}/inputs" testpr
 # shellcheck disable=SC1091 -- generated, fixed-schema test data
 source "${fixture_root}/inputs/fixture.env"
 
+previous_args=()
+if [[ ${TEST_PREVIOUS_V7:-no} == yes ]]; then
+  previous_args=(
+    --previous-v7-ref local/titra:previous-v7
+    --previous-v7-id "sha256:$(printf 'e%.0s' {1..64})"
+    --previous-v7-config-id "sha256:$(printf 'f%.0s' {1..64})"
+  )
+fi
+
+run_builder() {
 "${DEPLOYMENT_ROOT}/build-v7-release.sh" \
   --release-id "$release_id" \
   --release-profile "$RELEASE_PROFILE" \
@@ -58,7 +68,23 @@ source "${fixture_root}/inputs/fixture.env"
   --db-service mongodb \
   --app-container titra_app \
   --db-container titra_db \
-  --database titra
+  --database titra "${previous_args[@]}" "$@"
+}
+run_builder
+
+if [[ ${TEST_PREVIOUS_V7:-no} == yes ]]; then
+  if run_builder --previous-v7-id "$CANDIDATE_ID" >"${fixture_root}/rejected.log" 2>&1; then
+    printf 'ERROR: accepted a previous-v7 identity overlapping the candidate.\n' >&2
+    exit 1
+  fi
+  grep -F 'Previous-v7 image identity overlaps' "${fixture_root}/rejected.log" >/dev/null
+else
+  if run_builder --previous-v7-ref local/titra:previous-v7 >"${fixture_root}/rejected.log" 2>&1; then
+    printf 'ERROR: accepted incomplete previous-v7 admission.\n' >&2
+    exit 1
+  fi
+  grep -F 'All three previous-v7 identity arguments' "${fixture_root}/rejected.log" >/dev/null
+fi
 
 "${DEPLOYMENT_ROOT}/verify-v7-release.sh" --release-dir "$output_root"
 printf 'Release-builder integration test passed.\n'

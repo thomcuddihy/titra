@@ -20,7 +20,8 @@ usage() {
   cat <<EOF
 Usage: $0 --target v6|v7
 
-Supported paths are exact stock->v7, v5->v6, v5->v7, and v6->v7. This
+Supported paths are exact stock->v7, v5->v6, v5->v7, v6->v7, and explicitly
+pinned previous-v7->v7. This
 preflight is read-only and calculates current backup/source-image headroom.
 EOF
 }
@@ -50,8 +51,9 @@ current_id=$(container_value "$APP_CONTAINER" '{{.Image}}')
 current_ref=$(container_value "$APP_CONTAINER" '{{.Config.Image}}')
 validate_image_id "$current_id"
 source_kind=$(supported_source_kind "$current_id") ||
-  die "Production image ${current_id} is not an approved stock/v5/v6 source."
+  die "Production image ${current_id} is not an approved stock/v5/v6/previous-v7 source."
 validate_transition "$source_kind" "$target"
+validate_previous_v7_source_environment "$source_kind"
 target_id=$(validate_loaded_target_state "$target")
 target_ref=$(target_image_ref "$target")
 [[ $target_id != "$current_id" ]] || die 'Production already runs the selected target image.'

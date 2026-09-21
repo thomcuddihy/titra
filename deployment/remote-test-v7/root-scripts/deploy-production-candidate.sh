@@ -20,7 +20,7 @@ Usage:
   $0 --target v6|v7 --ticket CHANGE_ID --dry-run
   $0 --target v6|v7 --ticket CHANGE_ID --confirm 'EXACT PHRASE'
 
-Supported exact paths: stock->v7, v5->v6, v5->v7, and v6->v7.
+Supported exact paths: stock->v7, v5->v6, v5->v7, v6->v7, and pinned previous-v7->v7.
 Every real run stops the exact source, takes and verifies its switch-snapshot
 Mongo backup, and keeps it stopped while preserving the source image and
 recreating only the Titra application.
@@ -63,8 +63,9 @@ require_no_unfinished_v7_operations
 source_id=$(container_value "$APP_CONTAINER" '{{.Image}}')
 source_ref=$(container_value "$APP_CONTAINER" '{{.Config.Image}}')
 source_kind=$(supported_source_kind "$source_id") ||
-  die "Production does not run an approved stock/v5/v6 source: ${source_id}."
+  die "Production does not run an approved stock/v5/v6/previous-v7 source: ${source_id}."
 validate_transition "$source_kind" "$target"
+validate_previous_v7_source_environment "$source_kind"
 target_id=$(validate_loaded_target_state "$target")
 target_ref=$(target_image_ref "$target")
 [[ $target_id != "$source_id" ]] || die 'Production already runs the requested target.'
@@ -94,6 +95,7 @@ validate_no_unsafe_production_bootstrap_flags
 require_no_unfinished_v7_operations
 [[ $(container_value "$APP_CONTAINER" '{{.Image}}') == "$source_id" ]] ||
   die 'Production source image changed before the exclusive deployment lock was acquired.'
+validate_previous_v7_source_environment "$source_kind"
 [[ $(validate_loaded_target_state "$target") == "$target_id" ]] ||
   die 'Deployment target changed before the exclusive lock was acquired.'
 if [[ $target == v7 ]]; then

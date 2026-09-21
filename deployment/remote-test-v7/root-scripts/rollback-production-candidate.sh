@@ -343,7 +343,7 @@ mongo_identity_before=$(mongo_identity_snapshot)
 write_record "$state_file" status "$rollback_status"
 if [[ $locked_application_present != true ]]; then
   source_rollback_ref=$(ensure_preserved_source_loaded "$source_kind" "$source_id")
-  if [[ $source_kind == v6 ]]; then source_override_kind=v6; else source_override_kind=source; fi
+  source_override_kind=$(source_override_kind "$source_kind")
   write_transition_override "$ACTIVE_OVERRIDE" "$source_rollback_ref" "$source_override_kind"
   validate_transition_override "$ACTIVE_OVERRIDE" "$source_override_kind" "$source_rollback_ref"
   app_stopped=true
@@ -433,7 +433,7 @@ if [[ $target_kind == v7 ]]; then
   sync -f "$STATE_ROOT"
 fi
 source_rollback_ref=$(ensure_preserved_source_loaded "$source_kind" "$source_id")
-if [[ $source_kind == v6 ]]; then source_override_kind=v6; else source_override_kind=source; fi
+source_override_kind=$(source_override_kind "$source_kind")
 target_replacement_started=true
 write_transition_override "$ACTIVE_OVERRIDE" "$source_rollback_ref" "$source_override_kind"
 validate_transition_override "$ACTIVE_OVERRIDE" "$source_override_kind" "$source_rollback_ref"

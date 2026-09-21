@@ -96,6 +96,9 @@ printf '  latest deployment run:     %s\n' "${latest_deployment:-none}"
 printf '  latest rollback run:       %s\n' "${latest_rollback:-none}"
 printf '  supported deployment paths:\n'
 printf '    stock -> v7; v5 -> v6; v5 -> v7; v6 -> v7\n'
+if [[ $(release_value PREVIOUS_V7_IMAGE_ID) != none ]]; then
+  printf '    explicitly pinned previous-v7 -> v7 (existing runtime key retained)\n'
+fi
 printf '  rollback policy:\n'
 printf '    receipt-bound source image plus full predeployment database restore only\n'
 [[ $current_kind != unsupported ]] ||

@@ -21,6 +21,10 @@ Safety properties include:
 - continuous application stop across the authoritative pre-deployment backup;
 - immutable deployment receipts binding source, target, database backup, and
   runtime configuration;
+- optional exact previous-v7 image admission, retaining and checking the existing
+  OAuth key for both upgrade and receipt-bound rollback;
+- release-specific image-load receipts alongside shared operation locks and
+  unfinished-run checks;
 - fail-closed post-switch behavior; and
 - full rollback that first takes a current-state safety backup, then restores
   the receipt-bound pre-deployment database and exact source image.

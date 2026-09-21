@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
+import { createCipheriv, randomBytes } from 'node:crypto'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 import { runInNewContext } from 'node:vm'
@@ -453,6 +454,118 @@ test('credential inspection applies every path-aware plaintext size blocker', ()
     4096, 4096, 4096, 4096, 4096, 4096,
     16384, 16384, 16384, 16384,
   ])
+})
+
+const fixtureCredentialKey = Buffer.alloc(16, 17).toString('base64')
+function sealFixture(payload, { key = fixtureCredentialKey, raw = false } = {}) {
+  const iv = randomBytes(12)
+  const cipher = createCipheriv('aes-128-gcm', Buffer.from(key, 'base64'), iv)
+  cipher.setAAD(Buffer.alloc(0))
+  const plaintext = raw ? payload : Buffer.from(JSON.stringify(payload))
+  const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()])
+  return {
+    iv: iv.toString('base64'), ciphertext: ciphertext.toString('base64'),
+    algorithm: 'aes-128-gcm', authTag: cipher.getAuthTag().toString('base64'),
+  }
+}
+
+test('previous-v7 sealed credentials require canonical exact envelopes and authenticated original key', () => {
+  const value = sealFixture({ data: 'private-example-token' })
+  assert.equal(preflight.validSealedCredential(value, fixtureCredentialKey, 'value'), true)
+  assert.equal(preflight.validSealedCredential(value, Buffer.alloc(16, 18).toString('base64'), 'value'), false)
+  for (const invalid of [
+    {}, { ...value, extra: true }, { ...value, algorithm: 'aes-256-gcm' },
+    { ...value, iv: Buffer.alloc(11).toString('base64') },
+    { ...value, authTag: Buffer.alloc(16).toString('base64') },
+    { ...value, ciphertext: ` ${value.ciphertext}` },
+    { ...value, ciphertext: '' }, { ...value, authTag: value.authTag.replace(/=+$/u, '') },
+    { ...value, iv: Buffer.alloc(12).toString('base64') },
+  ]) assert.equal(preflight.validSealedCredential(invalid, fixtureCredentialKey, 'value'), false)
+  assert.equal(preflight.canonicalBase64('Zh==', 1, 1), false, 'reject noncanonical pad bits')
+})
+
+test('sealed plaintext must be bounded valid string data without unsupported EJSON or user binding', () => {
+  for (const payload of [
+    { data: {} }, { data: null }, { data: 123 }, {},
+    { data: 'token', userId: 'someone' }, { data: 'token', extra: true },
+    { data: '\ud800' }, { data: 'x'.repeat(4097) },
+  ]) assert.equal(preflight.validSealedCredential(sealFixture(payload), fixtureCredentialKey, 'value'), false)
+  for (const raw of [Buffer.from('not-json'), Buffer.from([0xff, 0xfe])]) {
+    assert.equal(preflight.validSealedCredential(sealFixture(raw, { raw: true }), fixtureCredentialKey, 'value'), false)
+  }
+  assert.equal(preflight.validSealedCredential(sealFixture({ data: '' }), fixtureCredentialKey, 'value'), true)
+  assert.equal(preflight.validSealedCredential(sealFixture({ data: 'x'.repeat(16384) }), fixtureCredentialKey,
+    'services.oidc.accessToken'), true)
+  assert.equal(preflight.validSealedCredential(sealFixture({ data: '\u0001'.repeat(4096) }), fixtureCredentialKey,
+    'profile.siwapptoken'), true)
+})
+
+function sealedFixtureDatabase(values, { count = values.length } = {}) {
+  let reads = 0
+  return {
+    get reads() { return reads },
+    getCollection(name) {
+      return {
+        countDocuments(selector) {
+          if (name !== 'globalsettings') return 0
+          const condition = selector.$and?.at(-1)
+          if (JSON.stringify(condition) === JSON.stringify(preflight.exactType('value', 'object'))) return count
+          if (condition?.$or?.some((part) => part.$expr?.$eq?.[1] === 'object')) return count
+          return 0
+        },
+        find(_selector, projection) {
+          reads += 1
+          assert.deepEqual(projection, { _id: 0, value: 1 })
+          return {
+            sort() { return this },
+            limit(value) { assert.equal(value, 5001); return this },
+            maxTimeMS(value) { assert.equal(value, preflight.QUERY_TIMEOUT_MS); return this },
+            toArray() { return values.map((value) => ({ value })) },
+          }
+        },
+      }
+    },
+  }
+}
+
+test('only source-proven sealed objects are excluded from the blocking object count', () => {
+  const valid = sealFixture({ data: 'private-example-token' })
+  const database = sealedFixtureDatabase([valid, { arbitrary: 'object' }])
+  assert.equal(preflight.inspectCredentials(database).credential_object_fields, 2)
+  assert.equal(database.reads, 0, 'legacy sources never inspect/accept encrypted objects')
+  const counts = preflight.inspectCredentials(database, { credentialKey: fixtureCredentialKey })
+  assert.equal(counts.credential_object_fields, 1)
+  assert.equal(counts.credential_candidate_documents, 2)
+  assert.equal(preflight.summaryStatus({ ...healthyCounts(), ...counts }), 'BLOCK')
+  const good = preflight.inspectCredentials(sealedFixtureDatabase([valid]), { credentialKey: fixtureCredentialKey })
+  assert.equal(good.credential_object_fields, 0)
+  assert.equal(preflight.summaryStatus({ ...healthyCounts(), ...good }), 'PASS')
+  assert.throws(() => preflight.inspectCredentials(database, { credentialKey: 'bad-key' }))
+})
+
+test('sealed-object inspection fails closed on overflow, cardinality changes, or wrong keys', () => {
+  const valid = sealFixture({ data: 'private-example-token' })
+  const excessive = sealedFixtureDatabase([], { count: 5001 })
+  const counts = preflight.inspectCredentials(excessive, { credentialKey: fixtureCredentialKey })
+  assert.equal(counts.credential_candidate_over_limit, 1)
+  assert.equal(counts.credential_object_fields, 5001)
+  assert.equal(excessive.reads, 0)
+  assert.throws(() => preflight.inspectCredentials(sealedFixtureDatabase([], { count: 1 }),
+    { credentialKey: fixtureCredentialKey }))
+  assert.equal(preflight.inspectCredentials(sealedFixtureDatabase([valid]), {
+    credentialKey: Buffer.alloc(16, 19).toString('base64'),
+  }).credential_object_fields, 1)
+})
+
+test('root wrapper source-binds the retained key and pipes it without secret argv or files', () => {
+  assert.match(shell, /source "\$\{SCRIPT_DIR\}\/v7-transition[.]sh"/u)
+  assert.match(shell, /if previous_v7_image_id_is_allowed "\$expected_app_image"; then\s+validate_previous_v7_source_environment previous-v7\s+credential_key=/u)
+  assert.match(shell, /printf 'globalThis[.]TITRA_V7_PREFLIGHT_CREDENTIAL_KEY = "%s";\\n' "\$credential_key"/u)
+  assert.match(shell, /\} \| docker exec --interactive "\$DB_CONTAINER"/u)
+  assert.doesNotMatch(shell, /(?:--env|--eval)[^\n]*(?:credential_key|CREDENTIAL_KEY)/u)
+  assert.doesNotMatch(shell, /printf[^\n]*credential_key[^\n]*>/u)
+  assert.ok((shell.match(/validate_previous_v7_source_environment previous-v7/gu) || []).length >= 2)
+  assert.match(shell, /unset credential_key/u)
 })
 
 test('database exceptions produce only a fixed error marker and status', () => {

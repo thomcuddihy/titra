@@ -29,6 +29,7 @@ readonly LOCK_DIR='__V7_LOCK_DIR__'
 readonly LOCK_FILE="${LOCK_DIR}/operator.lock"
 readonly EXPECTED_CONFIRMATION='INSTALL VERIFIED TITRA REMOTE TEST R7 PACKAGE'
 readonly EXPECTED_PACKAGE_RELEASE_ID='__V7_PACKAGE_RELEASE_ID__'
+readonly EXPECTED_PREVIOUS_V7_IMAGE_ID='__V7_PREVIOUS_V7_IMAGE_ID__'
 readonly TITRA_ARCHIVE='__V7_TITRA_IMAGE_ARCHIVE__'
 readonly MONGO_ARCHIVE='__V7_MONGO_IMAGE_ARCHIVE__'
 readonly V6_ARCHIVE='__V7_V6_IMAGE_ARCHIVE__'
@@ -56,6 +57,13 @@ require_safe_path_chain() {
     [[ $path == '/' ]] && break
     path=$(dirname -- "$path")
   done
+}
+
+require_previous_v7_runtime_configuration() {
+  [[ $EXPECTED_PREVIOUS_V7_IMAGE_ID != none ]] || return 0
+  [[ -f $V7_RUNTIME_CONFIG && ! -L $V7_RUNTIME_CONFIG &&
+    $(stat -c '%u:%g:%a:%h' -- "$V7_RUNTIME_CONFIG") == '0:0:600:1' ]] ||
+    die 'Previous-v7 update requires the existing protected runtime configuration; no replacement key will be generated.'
 }
 
 require_complete_checksum_manifest() {
@@ -347,6 +355,7 @@ if [[ -e $STATE_ROOT ]]; then
   [[ -d $STATE_ROOT && ! -L $STATE_ROOT ]] || die "State root is not a direct directory: ${STATE_ROOT}"
   require_safe_path_chain "$STATE_ROOT"
 fi
+require_previous_v7_runtime_configuration
 if [[ -e $BACKUP_BASE ]]; then
   [[ -d $BACKUP_BASE && ! -L $BACKUP_BASE ]] || die "Backup root is not a direct directory: ${BACKUP_BASE}"
   require_safe_path_chain "$BACKUP_BASE"
@@ -473,6 +482,8 @@ if [[ -e $V7_RUNTIME_CONFIG || -L $V7_RUNTIME_CONFIG ]]; then
     die 'Existing v7 runtime configuration is unsafe.'
 else
   runtime_created=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+  [[ $EXPECTED_PREVIOUS_V7_IMAGE_ID == none ]] ||
+    die 'Previous-v7 runtime configuration disappeared; refusing to generate a replacement key.'
   oauth_secret_key=$(openssl rand -base64 16 | tr -d '\n')
   [[ $oauth_secret_key =~ ^[A-Za-z0-9+/]{22}==$ &&
     $(printf '%s' "$oauth_secret_key" | base64 --decode 2>/dev/null | wc -c | awk '{print $1}') == '16' ]] ||

@@ -36,4 +36,5 @@ else
 fi
 
 NODE_BIN=$node_exec "${SCRIPT_DIR}/tests/release-builder-integration.sh"
+TEST_PREVIOUS_V7=yes NODE_BIN=$node_exec "${SCRIPT_DIR}/tests/release-builder-integration.sh"
 printf 'Complete deployment-operations test suite passed.\n'

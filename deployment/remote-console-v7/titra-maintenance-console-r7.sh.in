@@ -536,6 +536,7 @@ Titra maintenance-r7 console
   6) Configure exact private integration hosts (before v7)
   7) Preview a supported deployment path
   8) Deploy v6 or v7 through a supported path
+     (includes an explicitly pinned previous-v7 -> v7 update)
   9) Preview a receipt-bound full rollback
  10) Full rollback (source application and predeployment database)
  11) Show safe support-log copy instructions

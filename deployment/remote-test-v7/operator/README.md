@@ -44,6 +44,40 @@ The recommended sequence is:
 7. Test login, time-entry CRUD, projects, reports, administration, integrations,
    and restart behavior before ending the window.
 
+### Updating an already deployed v7
+
+Supply all three previous-v7 image identity arguments to the release builder.
+This adds only the exact pinned previous-v7 to v7 transition; arbitrary v7
+images and same-image redeployments remain rejected. Use a new immutable release
+ID, a separate install directory and console directory, and the existing
+protected state, backup, and lock roots. The old console/package and its image
+admission receipts are retained. New image-load receipts are release-specific;
+operation journals remain shared so unfinished older operations still block.
+
+The existing root-only runtime configuration is mandatory for these packages.
+Installation refuses a missing configuration instead of generating a new OAuth
+key, and deployment checks that the running previous-v7 key, private hosts, and
+single-instance recovery setting match it exactly. Do not rotate the key or
+change private-host configuration during this update. The deployment receipt
+binds a protected copy of this configuration, a verified stopped database
+snapshot, and an archive of the exact previous-v7 application image.
+
+The compatibility gate remains read-only and count-only. For an exact admitted
+previous-v7 image, it accepts a sealed integration credential only when its
+strict Meteor envelope is authenticated with the retained original key and the
+decrypted value satisfies the bounded string contract. The key travels only
+through anonymous standard input and decrypted values are never printed or
+saved. The blocking credential_object_fields count includes every object for
+legacy sources, or objects that fail these checks for previous-v7; this does not
+relax any other migration, index, configuration, or security checks.
+
+Use the new console's receipt-bound full rollback if necessary. It restores the
+previous-v7 image and its predeployment database with the same security runtime
+settings. Like every full rollback, this restores the snapshot's point in time:
+newer records are not retained in the active database. A safety backup of the
+current database is taken before restore. Keep users and automation quiesced
+until acceptance tests pass, and use the console matching the deployment receipt.
+
 If post-switch verification fails, leave the application stopped and use the
 receipt-bound full rollback. There is deliberately no application-only rollback:
 restoring old application code over a changed database is not considered safe.

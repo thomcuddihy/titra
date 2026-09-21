@@ -4,10 +4,12 @@
 # multi-generation maintenance-r7 transition. This file is sourced only by
 # root scripts installed beneath the configured maintenance package root.
 
-readonly V6_LOADED_STATE="${IMAGE_STATE_DIR}/loaded-v6.env"
-readonly V7_LOADED_STATE="${IMAGE_STATE_DIR}/loaded-v7.env"
-readonly V7_MONGO_LOADED_STATE="${IMAGE_STATE_DIR}/loaded-mongo-v7.env"
-readonly V7_ACTIVE_STATE="${IMAGE_STATE_DIR}/active-v7-transition.env"
+# Side-by-side packages share the live override, key, lock, and operation
+# journals, but never overwrite each other's image-admission receipts.
+readonly V6_LOADED_STATE="${IMAGE_STATE_DIR}/loaded-v6-__V7_PACKAGE_RELEASE_ID__.env"
+readonly V7_LOADED_STATE="${IMAGE_STATE_DIR}/loaded-v7-__V7_PACKAGE_RELEASE_ID__.env"
+readonly V7_MONGO_LOADED_STATE="${IMAGE_STATE_DIR}/loaded-mongo-v7-__V7_PACKAGE_RELEASE_ID__.env"
+readonly V7_ACTIVE_STATE="${IMAGE_STATE_DIR}/active-v7-transition-__V7_PACKAGE_RELEASE_ID__.env"
 
 v7_image_id_is_allowed() {
   release_candidate_image_id_is_allowed "$1"
@@ -24,6 +26,14 @@ mongo_image_id_is_allowed() {
     $1 == "$(release_value MONGO_CONFIG_IMAGE_ID)" ]]
 }
 
+previous_v7_image_id_is_allowed() {
+  local admitted_id admitted_config_id
+  admitted_id=$(release_value PREVIOUS_V7_IMAGE_ID)
+  admitted_config_id=$(release_value PREVIOUS_V7_CONFIG_IMAGE_ID)
+  [[ $admitted_id != none && $admitted_config_id != none &&
+    ( $1 == "$admitted_id" || $1 == "$admitted_config_id" ) ]]
+}
+
 supported_source_kind() {
   local image_id=$1
   if [[ $image_id == "$(release_value STOCK_IMAGE_ID)" ]]; then
@@ -32,6 +42,8 @@ supported_source_kind() {
     printf 'v5\n'
   elif v6_image_id_is_allowed "$image_id"; then
     printf 'v6\n'
+  elif previous_v7_image_id_is_allowed "$image_id"; then
+    printf 'previous-v7\n'
   else
     return 1
   fi
@@ -40,9 +52,26 @@ supported_source_kind() {
 validate_transition() {
   local source_kind=$1 target_kind=$2
   case "${source_kind}:${target_kind}" in
-    stock:v7|v5:v6|v5:v7|v6:v7) return 0 ;;
+    stock:v7|v5:v6|v5:v7|v6:v7|previous-v7:v7) return 0 ;;
     *) die "Unsupported r7 transition ${source_kind}->${target_kind}." ;;
   esac
+}
+
+source_override_kind() {
+  case $1 in
+    previous-v7) printf 'v7\n' ;;
+    v6) printf 'v6\n' ;;
+    stock|v5) printf 'source\n' ;;
+    *) die 'Unsupported source override kind.' ;;
+  esac
+}
+
+validate_previous_v7_source_environment() {
+  [[ $1 == previous-v7 ]] || return 0
+  # Never create or replace the key for an existing v7 database. The protected
+  # configuration must already describe the running predecessor exactly.
+  validate_v7_runtime_config || return 1
+  validate_running_target_environment v7
 }
 
 validate_no_unsafe_production_bootstrap_flags() {
@@ -316,7 +345,7 @@ source_archive_directory() {
 
 validate_preserved_source() {
   local source_kind=$1 source_id=$2 directory state archive checksum keys tag
-  [[ $source_kind == stock || $source_kind == v5 || $source_kind == v6 ]] ||
+  [[ $source_kind == stock || $source_kind == v5 || $source_kind == v6 || $source_kind == previous-v7 ]] ||
     die 'Preserved source kind is invalid.'
   validate_image_id "$source_id"
   directory=$(source_archive_directory "$source_kind" "$source_id")
@@ -347,7 +376,7 @@ validate_preserved_source() {
 
 preserve_source_image() {
   local source_kind=$1 source_ref=$2 source_id=$3 directory partial archive digest tag state
-  [[ $source_kind == stock || $source_kind == v5 || $source_kind == v6 ]] ||
+  [[ $source_kind == stock || $source_kind == v5 || $source_kind == v6 || $source_kind == previous-v7 ]] ||
     die 'Source image kind is invalid.'
   validate_safe_token 'source image reference' "$source_ref"
   validate_image_id "$source_id"
