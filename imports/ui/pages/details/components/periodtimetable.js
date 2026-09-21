@@ -2,10 +2,11 @@ import dayjs from 'dayjs'
 import utc from 'dayjs/plugin/utc'
 import { saveAs } from 'file-saver'
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra'
-import { NullXlsx } from '@neovici/nullxlsx/src/nullxlsx.js'
+import { normalizePageParameter } from '../../../../utils/pageParameter.js'
 import './periodtimetable.html'
 import './pagination.js'
 import './limitpicker.js'
+import { exportSheetToXlsx } from '../../../../utils/excelExport.js'
 import { i18nReady, t } from '../../../../utils/i18n.js'
 import {
   numberWithUserPrecision,
@@ -24,6 +25,7 @@ Template.periodtimetable.onCreated(function periodtimetableCreated() {
   dayjs.extend(utc)
   this.periodTimecards = new ReactiveVar()
   this.totalPeriodTimeCards = new ReactiveVar()
+  this.requestSequence = 0
   this.outboundInterfaces = new ReactiveVar([])
   this.autorun(() => {
     if (this.data?.project.get()
@@ -31,6 +33,8 @@ Template.periodtimetable.onCreated(function periodtimetableCreated() {
       && this.data?.period.get()
       && this.data?.limit.get()
       && this.data?.customer.get()) {
+      this.totalPeriodTimeCards.set(undefined)
+      const requestSequence = ++this.requestSequence
       this.projectUsersHandle = this.subscribe('projectResources', { projectId: this.data?.project.get() })
       const methodParameters = {
         projectId: this.data?.project.get(),
@@ -38,7 +42,7 @@ Template.periodtimetable.onCreated(function periodtimetableCreated() {
         period: this.data?.period.get(),
         customer: this.data?.customer.get(),
         limit: this.data?.limit.get(),
-        page: Number(FlowRouter.getQueryParam('page')),
+        page: normalizePageParameter(FlowRouter.getQueryParam('page')),
       }
       if (this.data?.period.get() === 'custom') {
         methodParameters.dates = {
@@ -47,6 +51,7 @@ Template.periodtimetable.onCreated(function periodtimetableCreated() {
         }
       }
       Meteor.call('getTotalHoursForPeriod', methodParameters, (error, result) => {
+        if (requestSequence !== this.requestSequence) return
         if (error) {
           console.error(error)
         } else {
@@ -149,7 +154,7 @@ Template.periodtimetable.events({
     }
     saveAs(new Blob([encodeCsv(csvRows)], { type: 'text/csv;charset=utf-8;header=present' }), `titra_total_time_${templateInstance.data.period.get()}.csv`)
   },
-  'click .js-export-xlsx': (event, templateInstance) => {
+  'click .js-export-xlsx': async (event, templateInstance) => {
     event.preventDefault()
     const data = [[t('globals.project')]]
     if (getGlobalSetting('showResourceInDetails')) {
@@ -163,7 +168,7 @@ Template.periodtimetable.events({
         data.push([timeEntry.projectId, timeEntry.totalHours])
       }
     }
-    saveAs(new NullXlsx('temp.xlsx', { frozen: 1, filter: 1 }).addSheetFromData(data, 'total time').createDownloadUrl(), `titra_total_time_${templateInstance.data.period.get()}.xlsx`)
+    await exportSheetToXlsx(data, 'total time', `titra_total_time_${templateInstance.data.period.get()}.xlsx`)
   },
   'click .js-outbound-interface': (event, templateInstance) => {
     event.preventDefault()

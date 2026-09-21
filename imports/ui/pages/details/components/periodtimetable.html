@@ -18,9 +18,7 @@
   <div id="datatable-container" class="mt-3 mb-3"></div>
   <div class="row">
     <div class="col-md-3"> 
-      {{#if periodTimecards}}
-        {{>pagination totalEntries=totalPeriodTimeCards limit=limit}}
-      {{/if}}
+      {{>pagination totalEntries=totalPeriodTimeCards limit=limit}}
     </div>
     <div class="col-md-3 ms-md-auto"> 
       {{>limitpicker}}

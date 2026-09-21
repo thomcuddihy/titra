@@ -43,9 +43,7 @@
     </div>
     <div class="row">
         <div class="col-md-3 ">
-            {{#if detailTimeEntries}}
-                {{>pagination totalEntries=totalDetailTimeEntries limit=limit}}
-            {{/if}}
+            {{>pagination totalEntries=totalDetailTimeEntries limit=limit}}
         </div>
         <div class="col-md-3 ms-md-auto">
             {{>limitpicker}}

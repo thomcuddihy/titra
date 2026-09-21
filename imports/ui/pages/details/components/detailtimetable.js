@@ -3,9 +3,10 @@ import utc from 'dayjs/plugin/utc'
 import customParseFormat from 'dayjs/plugin/customParseFormat'
 import { saveAs } from 'file-saver'
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra'
-import { NullXlsx } from '@neovici/nullxlsx/src/nullxlsx.js'
+import { normalizePageParameter } from '../../../../utils/pageParameter.js'
 import { Modal } from 'bootstrap'
 import { i18nReady, t } from '../../../../utils/i18n.js'
+import { exportSheetToXlsx } from '../../../../utils/excelExport.js'
 import Timecards from '../../../../api/timecards/timecards'
 import CustomFields from '../../../../api/customfields/customfields'
 import {
@@ -109,6 +110,7 @@ Template.detailtimetable.onCreated(function workingtimetableCreated() {
       && this.data?.customer.get()
       && this.data?.period.get()
       && this.data?.limit.get()) {
+        this.totalDetailTimeEntries.set(undefined)
         this.myProjectsHandle = this.subscribe('myprojects', {})
         this.projectResourcesHandle = this.subscribe('projectResources', { projectId: this.data?.project.get() })
         const subscriptionParameters = {
@@ -119,7 +121,7 @@ Template.detailtimetable.onCreated(function workingtimetableCreated() {
           limit: this.data?.limit.get(),
           search: this.search.get(),
           sort: this.sort.get(),
-          page: Number(FlowRouter.getQueryParam('page')),
+          page: normalizePageParameter(FlowRouter.getQueryParam('page')),
           filters: this.filters.get(),
         }
         if (this.data?.period.get() === 'custom') {
@@ -149,7 +151,7 @@ Template.detailtimetable.onCreated(function workingtimetableCreated() {
         },
         userId: this.data?.resource.get(),
         limit: this.data?.limit.get(),
-        page: Number(FlowRouter.getQueryParam('page')),
+        page: normalizePageParameter(FlowRouter.getQueryParam('page')),
         sort: this.sort.get(),
         filters: this.filters.get(),
       }))
@@ -543,7 +545,7 @@ Template.detailtimetable.events({
       }
     })
   },
-  'click .js-export-xlsx': (event, templateInstance) => {
+  'click .js-export-xlsx': async (event, templateInstance) => {
     event.preventDefault()
     const data = [[t('globals.project'), t('globals.date'), t('globals.task')]]
     if (getGlobalSetting('showResourceInDetails')) {
@@ -598,8 +600,9 @@ Template.detailtimetable.events({
       }
       data.push(row)
     }
-    saveAs(
-      new NullXlsx('temp.xlsx', { frozen: 1, filter: 1 }).addSheetFromData(data, 'titra export').createDownloadUrl(),
+    await exportSheetToXlsx(
+      data,
+      'titra export',
       `titra_export_${dayjs().format('YYYYMMDD-HHmm')}_${$('#resourceselect option:selected').text().replace(' ', '_').toLowerCase()}.xlsx`,
     )
     Meteor.call('setTimeEntriesState', { timeEntries: Timecards.find(selector, templateInstance.selector.get()[1]).fetch().map((entry) => entry._id), state: 'exported' }, (error) => {

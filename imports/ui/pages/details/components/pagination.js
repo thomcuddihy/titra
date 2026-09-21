@@ -1,66 +1,75 @@
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra'
+import { MAX_PAGE_PARAMETER, normalizePageParameter } from '../../../../utils/pageParameter.js'
 import './pagination.html'
+
+function pageCount(totalEntries, limit) {
+  // An unavailable count is not an empty result: preserve direct page links
+  // until the subscription or method has returned its first count.
+  if (!Number.isSafeInteger(totalEntries) || totalEntries < 0
+    || !Number.isSafeInteger(limit) || limit < 1) return undefined
+  return Math.min(MAX_PAGE_PARAMETER, Math.max(1, Math.ceil(totalEntries / limit)))
+}
+
+function navigateToPage(templateInstance, page) {
+  const numPages = templateInstance.numPages.get()
+  if (numPages === undefined || !Number.isSafeInteger(page)
+    || page < 1 || page > numPages || page === templateInstance.currentPage.get()) return
+  templateInstance.currentPage.set(page)
+  FlowRouter.setQueryParams({ page: page === 1 ? null : page })
+}
 
 Template.pagination.onCreated(function paginationCreated() {
   this.currentPage = new ReactiveVar(1)
-  this.numPages = new ReactiveVar(1)
+  this.numPages = new ReactiveVar()
   this.autorun(() => {
-    this.numPages.set(Math.ceil(Number((this.data?.totalEntries.get() / this.data?.limit.get())))
-      .toFixed(0))
-    if (FlowRouter.getQueryParam('page')) {
-      this.currentPage.set(FlowRouter.getQueryParam('page'))
-      if (this.currentPage.get() > this.numPages.get()) {
-        FlowRouter.setQueryParams({ page: null })
-      }
+    const numPages = pageCount(this.data?.totalEntries?.get(), this.data?.limit?.get())
+    const requestedPage = FlowRouter.getQueryParam('page')
+    let page = normalizePageParameter(requestedPage)
+    if (numPages !== undefined && page > numPages) page = 1
+    this.numPages.set(numPages)
+    this.currentPage.set(page)
+    if (requestedPage != null && String(requestedPage) !== String(page)) {
+      FlowRouter.setQueryParams({ page: null })
     }
   })
 })
 Template.pagination.helpers({
   showPagination() {
-    if (Template.instance().data.limit && Template.instance().data.totalEntries) {
-      return Template.instance().data.limit.get() < Template.instance().data.totalEntries.get()
-    }
-    return false
+    return Template.instance().numPages.get() > 1
   },
   getPages() {
-    const pages = []
-    if (Template.instance().data.limit && Template.instance().data.totalEntries) {
-      for (let i = 0; i < Template.instance().numPages.get(); i++) {
-        pages.push(Number(i + 1))
-      }
-    }
-    return pages
+    const numPages = Template.instance().numPages.get()
+    return Array.from({ length: numPages ?? 0 }, (_, index) => index + 1)
   },
   activeClass(page) {
-    return Number(page).toFixed(0) === Number(Template.instance().currentPage.get()).toFixed(0) ? 'active' : ''
+    return page === Template.instance().currentPage.get() ? 'active' : ''
   },
   disabledClass(type) {
-    if (type === 'previous' && Number(Template.instance().currentPage.get()).toFixed(0) === Number(1).toFixed(0)) {
-      return 'disabled'
-    }
-    if (type === 'next' && Number(Template.instance().currentPage.get()).toFixed(0) === Template.instance().numPages.get()) {
-      return 'disabled'
-    }
-    if ((Template.instance().data.limit && Template.instance().data.totalEntries)) {
-      return Template.instance().data.limit.get() < 0 || Template.instance().data.limit.get() > Template.instance().data.totalEntries.get() ? 'disabled' : ''
-    }
-    return 'disabled'
+    const templateInstance = Template.instance()
+    const numPages = templateInstance.numPages.get()
+    const currentPage = templateInstance.currentPage.get()
+    if (numPages === undefined
+      || (type === 'previous' && currentPage <= 1)
+      || (type === 'next' && currentPage >= numPages)) return 'disabled'
+    return ''
   },
 })
 Template.pagination.events({
   'click .js-previous': (event) => {
     event.preventDefault()
-    Template.instance().currentPage.set(Number(Template.instance().currentPage.get()) - 1)
-    FlowRouter.setQueryParams({ page: Template.instance().currentPage.get() })
+    const templateInstance = Template.instance()
+    navigateToPage(templateInstance, templateInstance.currentPage.get() - 1)
   },
   'click .js-next': (event) => {
     event.preventDefault()
-    Template.instance().currentPage.set(Number(Template.instance().currentPage.get()) + 1)
-    FlowRouter.setQueryParams({ page: Template.instance().currentPage.get() })
+    const templateInstance = Template.instance()
+    navigateToPage(templateInstance, templateInstance.currentPage.get() + 1)
   },
   'click .js-page-number': (event) => {
     event.preventDefault()
-    Template.instance().currentPage.set($(event.currentTarget).text())
-    FlowRouter.setQueryParams({ page: $(event.currentTarget).text() })
+    const pageText = $(event.currentTarget).text().trim()
+    const page = normalizePageParameter(pageText)
+    if (String(page) !== pageText) return
+    navigateToPage(Template.instance(), page)
   },
 })

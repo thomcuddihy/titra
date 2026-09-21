@@ -19,8 +19,6 @@
   <div class="col-md-3 ms-md-auto"> 
     {{>limitpicker}}
 </div>
-  {{#if workingTimeEntries}}
-    {{>pagination totalEntries=totalWorkingTimeEntries limit=limit}}
-  {{/if}}
+  {{>pagination totalEntries=totalWorkingTimeEntries limit=limit}}
 </template>
 

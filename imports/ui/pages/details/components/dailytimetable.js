@@ -1,11 +1,12 @@
 import dayjs from 'dayjs'
 import utc from 'dayjs/plugin/utc'
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra'
+import { normalizePageParameter } from '../../../../utils/pageParameter.js'
 import { saveAs } from 'file-saver'
-import { NullXlsx } from '@neovici/nullxlsx/src/nullxlsx.js'
 import './dailytimetable.html'
 import './pagination.js'
 import './limitpicker.js'
+import { exportSheetToXlsx } from '../../../../utils/excelExport.js'
 import {
   getGlobalSetting,
   numberWithUserPrecision,
@@ -24,6 +25,7 @@ Template.dailytimetable.onCreated(function dailytimetablecreated() {
   dayjs.extend(utc)
   this.dailyTimecards = new ReactiveVar()
   this.totalEntries = new ReactiveVar()
+  this.requestSequence = 0
   this.outboundInterfaces = new ReactiveVar([])
   this.autorun(() => {
     if (this.data?.project.get()
@@ -31,6 +33,8 @@ Template.dailytimetable.onCreated(function dailytimetablecreated() {
       && this.data?.period.get()
       && this.data?.limit.get()
       && this.data?.customer.get()) {
+      this.totalEntries.set(undefined)
+      const requestSequence = ++this.requestSequence
       this.projectUsersHandle = this.subscribe('projectResources', { projectId: this.data?.project.get() })
       const methodParameters = {
         projectId: this.data?.project.get(),
@@ -38,7 +42,7 @@ Template.dailytimetable.onCreated(function dailytimetablecreated() {
         period: this.data?.period.get(),
         limit: this.data?.limit.get(),
         customer: this.data?.customer.get(),
-        page: Number(FlowRouter.getQueryParam('page')),
+        page: normalizePageParameter(FlowRouter.getQueryParam('page')),
       }
       if (this.data?.period.get() === 'custom') {
         methodParameters.dates = {
@@ -47,6 +51,7 @@ Template.dailytimetable.onCreated(function dailytimetablecreated() {
         }
       }
       Meteor.call('getDailyTimecards', methodParameters, (error, result) => {
+        if (requestSequence !== this.requestSequence) return
         if (error) {
           console.error(error)
         } else {
@@ -172,7 +177,7 @@ Template.dailytimetable.events({
     }
     saveAs(new Blob([encodeCsv(csvRows)], { type: 'text/csv;charset=utf-8;header=present' }), `titra_daily_time_${templateInstance.data.period.get()}.csv`)
   },
-  'click .js-export-xlsx': (event, templateInstance) => {
+  'click .js-export-xlsx': async (event, templateInstance) => {
     event.preventDefault()
     let unit = t('globals.hour_plural')
     if (Meteor.user()) {
@@ -189,7 +194,7 @@ Template.dailytimetable.events({
         data.push([dayjs.utc(timeEntry.date).format(getGlobalSetting('dateformat')), timeEntry.projectId, timeEntry.totalHours])
       }
     }
-    saveAs(new NullXlsx('temp.xlsx', { frozen: 1, filter: 1 }).addSheetFromData(data, 'daily').createDownloadUrl(), `titra_daily_time_${templateInstance.data.period.get()}.xlsx`)
+    await exportSheetToXlsx(data, 'daily', `titra_daily_time_${templateInstance.data.period.get()}.xlsx`)
   },
   'click .js-outbound-interface': (event, templateInstance) => {
     event.preventDefault()

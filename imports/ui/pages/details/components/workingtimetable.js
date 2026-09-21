@@ -2,8 +2,9 @@ import dayjs from 'dayjs'
 import utc from 'dayjs/plugin/utc'
 import { saveAs } from 'file-saver'
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra'
-import { NullXlsx } from '@neovici/nullxlsx/src/nullxlsx.js'
+import { normalizePageParameter } from '../../../../utils/pageParameter.js'
 import { i18nReady, t } from '../../../../utils/i18n.js'
+import { exportSheetToXlsx } from '../../../../utils/excelExport.js'
 import {
   addToolTipToTableCell,
   getGlobalSetting,
@@ -21,11 +22,14 @@ Template.workingtimetable.onCreated(function workingtimetableCreated() {
   dayjs.extend(utc)
   this.workingTimeEntries = new ReactiveVar()
   this.totalWorkingTimeEntries = new ReactiveVar()
+  this.requestSequence = 0
   this.autorun(() => {
     if (this.data?.project.get()
       && this.data?.resource.get()
       && this.data?.period.get()
       && this.data?.limit.get()) {
+      this.totalWorkingTimeEntries.set(undefined)
+      const requestSequence = ++this.requestSequence
       this.subscribe('userRoles')
       this.projectUsersHandle = this.subscribe('projectResources', { projectId: this.data?.project.get() })
       const methodParameters = {
@@ -33,7 +37,7 @@ Template.workingtimetable.onCreated(function workingtimetableCreated() {
         userId: this.data?.resource.get(),
         period: this.data?.period.get(),
         limit: this.data?.limit.get(),
-        page: Number(FlowRouter.getQueryParam('page')),
+        page: normalizePageParameter(FlowRouter.getQueryParam('page')),
       }
       if (this.data?.period.get() === 'custom') {
         methodParameters.dates = {
@@ -42,6 +46,7 @@ Template.workingtimetable.onCreated(function workingtimetableCreated() {
         }
       }
       Meteor.call('getWorkingHoursForPeriod', methodParameters, (error, result) => {
+        if (requestSequence !== this.requestSequence) return
         if (error) {
           console.error(error)
         } else {
@@ -156,13 +161,13 @@ Template.workingtimetable.events({
     }
     saveAs(new Blob([encodeCsv(csvRows)], { type: 'text/csv;charset=utf-8;header=present' }), `titra_working_time_${templateInstance.data.period.get()}.csv`)
   },
-  'click .js-export-xlsx': (event, templateInstance) => {
+  'click .js-export-xlsx': async (event, templateInstance) => {
     event.preventDefault()
     const data = [[t('globals.date'), t('globals.resource'), t('details.startTime'), t('details.breakStartTime'), t('details.breakEndTime'), t('details.endTime'), t('details.totalTime'), t('details.regularWorkingTime'), t('details.regularWorkingTimeDifference')]]
     for (const timeEntry of templateInstance.workingTimeEntries.get()) {
       data.push([dayjs.utc(timeEntry.date).format(getGlobalSetting('dateformat')), timeEntry.resource, timeEntry.startTime, timeEntry.breakStartTime, timeEntry.breakEndTime, timeEntry.endTime, timeEntry.totalTime, timeEntry.regularWorkingTime, timeEntry.regularWorkingTimeDifference])
     }
-    saveAs(new NullXlsx('temp.xlsx', { frozen: 1, filter: 1 }).addSheetFromData(data, 'working time').createDownloadUrl(), `titra_working_time_${templateInstance.data.period.get()}.xlsx`)
+    await exportSheetToXlsx(data, 'working time', `titra_working_time_${templateInstance.data.period.get()}.xlsx`)
   },
 })
 Template.workingtimetable.onDestroyed(() => {
