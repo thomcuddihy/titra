@@ -38,7 +38,7 @@ function headerFilter(data) {
 }
 
 // eslint-disable-next-line import/prefer-default-export
-export async function exportSheetToXlsx(data, sheetName, fileName) {
+export async function exportSheetToXlsx(data, sheetName, fileName, { beforeSave = () => {} } = {}) {
   if (!Array.isArray(data) || data.some((row) => !Array.isArray(row))) {
     throw new TypeError('Excel export data must be an array of rows.')
   }
@@ -51,5 +51,8 @@ export async function exportSheetToXlsx(data, sheetName, fileName) {
     features: headerFilter(rows),
   }).toBlob()
 
+  // Compression may finish after the user cancels or changes the table query.
+  // The caller gets one final synchronous guard before the download begins.
+  beforeSave()
   saveAs(blob, fileName)
 }

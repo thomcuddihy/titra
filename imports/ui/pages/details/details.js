@@ -1,4 +1,5 @@
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra'
+import { limitParameterCorrection, normalizeLimitParameter } from '../../../utils/limitParameter.js'
 import './details.html'
 import './components/dailytimetable.js'
 import './components/periodtimetable.js'
@@ -54,11 +55,10 @@ Template.timecardlist.onRendered(() => {
     } else {
       templateInstance.activeTab.set('detailed-tab')
     }
-    if (FlowRouter.getQueryParam('limit')) {
-      templateInstance.limit.set(Number(FlowRouter.getQueryParam('limit')))
-    } else {
-      templateInstance.limit.set(25)
-    }
+    const rawLimit = FlowRouter.getQueryParam('limit')
+    templateInstance.limit.set(normalizeLimitParameter(rawLimit))
+    const correction = limitParameterCorrection(rawLimit)
+    if (correction) FlowRouter.setQueryParams(correction)
   })
 })
 Template.timecardlist.helpers({

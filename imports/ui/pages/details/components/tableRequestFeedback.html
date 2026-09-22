@@ -1,0 +1,11 @@
+<template name="tableRequestFeedback">
+  {{#if loading}}
+    <div class="my-3" role="status">{{t "globals.loading"}}</div>
+  {{/if}}
+  {{#if failed}}
+    <div class="alert alert-danger my-3" role="alert">
+      {{t "details.loadFailed"}}
+      <button type="button" class="btn btn-outline-danger ms-2 js-retry-details">{{t "navigation.retry"}}</button>
+    </div>
+  {{/if}}
+</template>

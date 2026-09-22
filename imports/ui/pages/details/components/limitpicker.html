@@ -3,13 +3,10 @@
     <span class="d-inline-block align-middle">{{t "limit.show"}} &nbsp;</span>
     <!-- <label class="align-middle"> &nbsp; {{t "limit.entries"}}</label> -->
     <div class="d-grid">
-      <select name="limitpicker" id="limitpicker" class="form-select">
-        <option value="10">10</option>
-        <option value="25" selected>25</option>
-        <option value="50">50</option>
-        <option value="100">100</option>
-        <option value="200">200</option>
-        <option value="-1">{{t "limit.all"}}</option>
+      <select name="limitpicker" id="limitpicker" class="form-select" aria-label="{{t 'limit.show'}}">
+        {{#each limit in limits}}
+          <option value="{{limit}}" selected="{{selected limit}}">{{limit}}</option>
+        {{/each}}
       </select>
     </div>
     <!-- <label class="align-middle"> &nbsp; {{t "limit.entries"}}</label> -->

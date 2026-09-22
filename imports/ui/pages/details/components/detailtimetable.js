@@ -1,12 +1,13 @@
 import dayjs from 'dayjs'
 import utc from 'dayjs/plugin/utc'
 import customParseFormat from 'dayjs/plugin/customParseFormat'
-import { saveAs } from 'file-saver'
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra'
 import { normalizePageParameter } from '../../../../utils/pageParameter.js'
+import { normalizeLimitParameter } from '../../../../utils/limitParameter.js'
+import { createDetailsRequestState } from '../../../../utils/detailsRequestState.js'
+import { tableRendererForTemplate } from './detailsTableRenderer.js'
 import { Modal } from 'bootstrap'
 import { i18nReady, t } from '../../../../utils/i18n.js'
-import { exportSheetToXlsx } from '../../../../utils/excelExport.js'
 import Timecards from '../../../../api/timecards/timecards'
 import CustomFields from '../../../../api/customfields/customfields'
 import {
@@ -17,7 +18,6 @@ import {
   getUserSetting,
   getUserTimeUnitVerbose,
   showToast,
-  waitForElement,
 } from '../../../../utils/frontend_helpers'
 import { projectResources } from '../../../../api/users/users.js'
 import Projects from '../../../../api/projects/projects'
@@ -27,7 +27,6 @@ import {
   getTimecardEndTime,
   getTimecardStartTime,
 } from '../../../../utils/timecardDate.js'
-import { encodeCsv } from '../../../../utils/csvExport.js'
 import {
   escapeDataTableText,
   secureDataTableColumns,
@@ -35,6 +34,8 @@ import {
 import './detailtimetable.html'
 import './pagination.js'
 import './limitpicker.js'
+import './tableRequestFeedback.js'
+import { createExportForTemplate } from './exportControls.js'
 
 const Counts = new Mongo.Collection('counts')
 
@@ -102,60 +103,54 @@ Template.detailtimetable.onCreated(function workingtimetableCreated() {
   this.selector = new ReactiveVar()
   this.filters = new ReactiveVar({})
   this.outboundInterfaces = new ReactiveVar([])
-  this.subscribe('customfieldsForClass', { classname: 'time_entry' })
-  this.subscribe('customfieldsForClass', { classname: 'project' })
-  this.autorun(() => {
-    if (this.data?.project.get()
-      && this.data?.resource.get()
-      && this.data?.customer.get()
-      && this.data?.period.get()
-      && this.data?.limit.get()) {
-        this.totalDetailTimeEntries.set(undefined)
-        this.myProjectsHandle = this.subscribe('myprojects', {})
-        this.projectResourcesHandle = this.subscribe('projectResources', { projectId: this.data?.project.get() })
-        const subscriptionParameters = {
-          projectId: this.data?.project.get(),
-          userId: this.data?.resource.get(),
-          customer: this.data?.customer.get(),
-          period: this.data?.period.get(),
-          limit: this.data?.limit.get(),
-          search: this.search.get(),
-          sort: this.sort.get(),
-          page: normalizePageParameter(FlowRouter.getQueryParam('page')),
-          filters: this.filters.get(),
-        }
-        if (this.data?.period.get() === 'custom') {
-          subscriptionParameters.dates = {
-            startDate: getUserSetting('customStartDate') ? getUserSetting('customStartDate') : dayjs.utc().startOf('month').toDate(), // Ensure consistent timezone usage
-            endDate: getUserSetting('customEndDate') ? getUserSetting('customEndDate') : dayjs.utc().toDate(), // Ensure consistent timezone usage
-          }
-        }
-        this.detailedEntriesPeriodCountHandle = this.subscribe('getDetailedTimeEntriesForPeriodCount', subscriptionParameters)
-        this.detailedTimeEntriesForPeriodHandle = this.subscribe('getDetailedTimeEntriesForPeriod', subscriptionParameters)
-    }
+  this.request = createDetailsRequestState({ ReactiveVar, rows: this.selector, total: this.totalDetailTimeEntries })
+  this.exportController = createExportForTemplate(this, 'detailed', () => {
+    const selector = this.selector.get()
+    return selector ? Timecards.find(selector[0], selector[1]).fetch() : []
   })
-  this.autorun(async () => {
+  this.autorun(() => {
+    this.request.retry.get()
     if (this.data?.project.get()
       && this.data?.resource.get()
       && this.data?.customer.get()
       && this.data?.period.get()
       && this.data?.limit.get()) {
-      this.selector.set(await buildDetailedTimeEntriesForPeriodSelectorAsync({
+      const requestSequence = this.request.begin()
+      const onStop = (error) => {
+        if (error && this.request.fail(requestSequence)) console.error(error)
+      }
+      this.myProjectsHandle = this.subscribe('myprojects', {}, { onStop })
+      this.projectResourcesHandle = this.subscribe('projectResources', { projectId: this.data?.project.get() }, { onStop })
+      this.timeCustomFieldsHandle = this.subscribe('customfieldsForClass', { classname: 'time_entry' }, { onStop })
+      this.projectCustomFieldsHandle = this.subscribe('customfieldsForClass', { classname: 'project' }, { onStop })
+      const subscriptionParameters = {
         projectId: this.data?.project.get(),
-        search: this.search.get(),
+        userId: this.data?.resource.get(),
         customer: this.data?.customer.get(),
         period: this.data?.period.get(),
-        dates: {
-          startDate: getUserSetting('customStartDate') ? getUserSetting('customStartDate') : dayjs.utc().startOf('month').toDate(), // Ensure consistent timezone usage
-          endDate: getUserSetting('customEndDate') ? getUserSetting('customEndDate') : dayjs.utc().toDate(), // Ensure consistent timezone usage
-        },
-        userId: this.data?.resource.get(),
-        limit: this.data?.limit.get(),
-        page: normalizePageParameter(FlowRouter.getQueryParam('page')),
+        limit: normalizeLimitParameter(this.data?.limit.get()),
+        search: this.search.get(),
         sort: this.sort.get(),
+        page: normalizePageParameter(FlowRouter.getQueryParam('page')),
         filters: this.filters.get(),
-      }))
-      delete this.selector.get()[1].skip
+      }
+      if (this.data?.period.get() === 'custom') {
+        subscriptionParameters.dates = {
+          startDate: getUserSetting('customStartDate') || dayjs.utc().startOf('month').toDate(),
+          endDate: getUserSetting('customEndDate') || dayjs.utc().toDate(),
+        }
+      }
+      this.exportQuery = subscriptionParameters
+      this.detailedEntriesPeriodCountHandle = this.subscribe('getDetailedTimeEntriesForPeriodCount', subscriptionParameters, { onStop })
+      this.detailedTimeEntriesForPeriodHandle = this.subscribe('getDetailedTimeEntriesForPeriod', subscriptionParameters, { onStop })
+      buildDetailedTimeEntriesForPeriodSelectorAsync(subscriptionParameters).then((selector) => {
+        if (!this.request.current(requestSequence)) return
+        // Minimongo contains the published page already; don't skip it twice.
+        delete selector[1].skip
+        this.selector.set(selector)
+      }).catch((error) => {
+        if (this.request.fail(requestSequence)) console.error(error)
+      })
     }
   })
   Meteor.call('outboundinterfaces.get', (error, result) => {
@@ -169,19 +164,28 @@ Template.detailtimetable.onCreated(function workingtimetableCreated() {
 })
 Template.detailtimetable.onRendered(() => {
   const templateInstance = Template.instance()
+  templateInstance.tableRenderer = tableRendererForTemplate(templateInstance)
   dayjs.extend(utc)
   templateInstance.autorun(() => {
-    if (templateInstance.detailedTimeEntriesForPeriodHandle?.ready()
+    // Subscribe to the request epoch before ready() short-circuits. Rapid
+    // filter changes can replace an unready handle without changing phase.
+    const requestSequence = templateInstance.request.generation()
+    if (templateInstance.request.phase.get() !== 'error'
+      && templateInstance.detailedTimeEntriesForPeriodHandle?.ready()
       && templateInstance.detailedEntriesPeriodCountHandle?.ready()
       && templateInstance.projectResourcesHandle?.ready() && i18nReady.get()
+      && templateInstance.myProjectsHandle?.ready()
+      && templateInstance.timeCustomFieldsHandle?.ready()
+      && templateInstance.projectCustomFieldsHandle?.ready()
       && templateInstance.selector.get()) {
+      templateInstance.request.complete(requestSequence)
       const data = Timecards.find(
         templateInstance.selector.get()[0],
         templateInstance.selector.get()[1],
       )
         .fetch().map((entry) => detailedDataTableMapper(entry, false))
       if (data.length === 0) {
-        $('.dt-row-totalRow').remove()
+        templateInstance.$('.dt-row-totalRow').remove()
       }
       const columns = [
         {
@@ -320,139 +324,111 @@ Template.detailtimetable.onRendered(() => {
         },
       )
       const securedColumns = secureDataTableColumns(columns)
-      if (!templateInstance.datatable) {
-        import('frappe-datatable/dist/frappe-datatable.css').then(() => {
-          import('frappe-datatable').then((datatable) => {
-            const DataTable = datatable.default
-            const datatableConfig = {
-              columns: securedColumns,
-              data,
-              serialNoColumn: false,
-              clusterize: false,
-              layout: 'ratio',
-              showTotalRow: true,
-              noDataMessage: t('tabular.sZeroRecords'),
-              inlineFilters: true,
-              events: {
-                onSortColumn(column) {
-                  if (column) {
-                    templateInstance.sort.set({ column: column.colIndex, order: column.sortOrder })
-                  }
-                },
-              },
-              headerDropdown: [
-                {
-                  label: 'Filter',
-                  action(column) {
-                    const filterModal = new Modal('#filterModal')
-                    filterModal.show()
-                    templateInstance.$('#genericFilter').html('')
-                    const uniqueRowValues = new Map()
-                    for (const row of templateInstance.datatable.datamanager.rows) {
-                      if (column.id === 'state') {
-                        if (row[column.colIndex].content === undefined) {
-                          uniqueRowValues.set('new', t('details.new'))
-                        } else {
-                          uniqueRowValues.set(
-                            row[column.colIndex].content,
-                            $(row[column.colIndex].html).text(),
-                          )
-                        }
-                      } else {
-                        uniqueRowValues.set(
-                          row[column.colIndex].content,
-                          $(row[column.colIndex].html).text()
-                            ? $(row[column.colIndex].html).text() : row[column.colIndex].content,
-                        )
-                      }
-                    }
-                    for (const [key, value] of uniqueRowValues) {
-                      templateInstance.$('#genericFilter').append(new Option(value, key))
-                    }
-                    templateInstance.$('#genericFilter').data('filtertarget', column.id)
-                  },
-                },
-              ],
+      const datatableConfig = {
+        columns: securedColumns,
+        data,
+        serialNoColumn: false,
+        clusterize: false,
+        layout: 'ratio',
+        showTotalRow: true,
+        noDataMessage: t('tabular.sZeroRecords'),
+        inlineFilters: true,
+        events: {
+          onSortColumn(column) {
+            if (column) {
+              templateInstance.sort.set({ column: column.colIndex, order: column.sortOrder })
             }
-            if (getGlobalSetting('useState')) {
-              datatableConfig
-                .getEditor = (colIndex, rowIndex, value, parent, column, row, editorData) => {
-                  if (column.id === 'state' && Timecards.findOne({ _id: editorData[editorData.length - 1] }).userId === Meteor.userId() && rowIndex !== 'totalRow') {
-                    const $select = document.createElement('select')
-                    $select.classList = 'form-control js-state-select'
-                    parent.style.padding = 0
-                    $select.style.position = 'absolute'
-                    $select.style.zIndex = 1000
-                    $select.size = 4
-                    $select.options.add(new Option(t('details.new'), 'new'))
-                    $select.options.add(new Option(t('details.exported'), 'exported'))
-                    $select.options.add(new Option(t('details.billed'), 'billed'))
-                    $select.options.add(new Option(t('details.notBillable'), 'notBillable'))
-
-                    parent.appendChild($select)
-                    return {
-                      initValue(initValue) {
-                        $select.focus()
-                        if (initValue) {
-                          $($select).val(initValue)
-                        } else {
-                          $select.selectedIndex = 0
-                        }
-                      },
-                      setValue(setValue) {
-                        Meteor.call('setTimeEntriesState', { timeEntries: [editorData[editorData.length - 1]], state: setValue }, (error) => {
-                          if (error) {
-                            console.error(error)
-                          } else {
-                            showToast(t('notifications.time_entry_updated'))
-                          }
-                        })
-                      },
-                      getValue() {
-                        return $($select).val()
-                      },
-                    }
+          },
+        },
+        headerDropdown: [
+          {
+            label: 'Filter',
+            action(column) {
+              const filterModal = new Modal('#filterModal')
+              filterModal.show()
+              templateInstance.$('#genericFilter').html('')
+              const uniqueRowValues = new Map()
+              for (const row of templateInstance.datatable.datamanager.rows) {
+                if (column.id === 'state') {
+                  if (row[column.colIndex].content === undefined) {
+                    uniqueRowValues.set('new', t('details.new'))
+                  } else {
+                    uniqueRowValues.set(
+                      row[column.colIndex].content,
+                      $(row[column.colIndex].html).text(),
+                    )
                   }
-                  return null
+                } else {
+                  uniqueRowValues.set(
+                    row[column.colIndex].content,
+                    $(row[column.colIndex].html).text()
+                      ? $(row[column.colIndex].html).text() : row[column.colIndex].content,
+                  )
                 }
-            }
-            try {
-              window.requestAnimationFrame(() => {
-                templateInstance.datatable = new DataTable('#datatable-container', datatableConfig)
-              })
-            } catch (error) {
-              console.error(`Caught error: ${error}`)
-            }
-          })
-        })
-      } else {
-        try {
-          templateInstance.datatable.refresh(data, securedColumns)
-          $('.dt-scrollable').height(`${parseInt(document.querySelector('.dt-row.vrow:last-of-type')?.style.top, 10) + 40}px`)
-        } catch (error) {
-          console.error(`Caught error: ${error}`)
-        }
+              }
+              for (const [key, value] of uniqueRowValues) {
+                templateInstance.$('#genericFilter').append(new Option(value, key))
+              }
+              templateInstance.$('#genericFilter').data('filtertarget', column.id)
+            },
+          },
+        ],
       }
+      if (getGlobalSetting('useState')) {
+        datatableConfig
+          .getEditor = (colIndex, rowIndex, value, parent, column, row, editorData) => {
+            if (column.id === 'state' && Timecards.findOne({ _id: editorData[editorData.length - 1] }).userId === Meteor.userId() && rowIndex !== 'totalRow') {
+              const $select = document.createElement('select')
+              $select.classList = 'form-control js-state-select'
+              parent.style.padding = 0
+              $select.style.position = 'absolute'
+              $select.style.zIndex = 1000
+              $select.size = 4
+              $select.options.add(new Option(t('details.new'), 'new'))
+              $select.options.add(new Option(t('details.exported'), 'exported'))
+              $select.options.add(new Option(t('details.billed'), 'billed'))
+              $select.options.add(new Option(t('details.notBillable'), 'notBillable'))
+
+              parent.appendChild($select)
+              return {
+                initValue(initValue) {
+                  $select.focus()
+                  if (initValue) {
+                    $($select).val(initValue)
+                  } else {
+                    $select.selectedIndex = 0
+                  }
+                },
+                setValue(setValue) {
+                  Meteor.call('setTimeEntriesState', { timeEntries: [editorData[editorData.length - 1]], state: setValue }, (error) => {
+                    if (error) {
+                      console.error(error)
+                    } else {
+                      showToast(t('notifications.time_entry_updated'))
+                    }
+                  })
+                },
+                getValue() {
+                  return $($select).val()
+                },
+              }
+            }
+            return null
+          }
+      }
+      templateInstance.tableRenderer.render(datatableConfig)
       const countsId = templateInstance.data.project.get() instanceof Array ? templateInstance.data.project.get().join('') : templateInstance.data.project.get()
       templateInstance.totalDetailTimeEntries
         .set(Counts.findOne({ _id: countsId })
           ? Counts.findOne({ _id: countsId }).count : 0)
-      if (window.BootstrapLoaded.get()) {
-        if (data.length === 0) {
-          $('.dt-scrollable').height('auto')
-        } else {
-          waitForElement(undefined, '.dt-scrollable').then((element) => {
-            $(element).height(`${parseInt(document.querySelector('.dt-row.vrow:last-of-type')?.style.top, 10) + 40}px`)
-            element.style.overflow = 'hidden'
-          })
-        }
-      }
     }
   })
 })
 Template.detailtimetable.helpers({
+  exportController: () => Template.instance().exportController,
+  exportBusy: () => Template.instance().exportController.busy.get(),
   detailTimeEntries() {
-    if(Template.instance().selector.get()) {
+    if (Template.instance().request.ready() && Template.instance().selector.get()) {
       return Timecards
         .find(
           Template.instance().selector.get()[0],
@@ -466,7 +442,7 @@ Template.detailtimetable.helpers({
     return false
   },
   detailTimeSum() {
-    if(Template.instance().selector.get()) {
+    if (Template.instance().request.ready() && Template.instance().selector.get()) {
       return timeInUserUnit(Timecards
         .find(Template.instance().selector.get()[0], Template.instance().selector.get()[1])
         .fetch().reduce(((total, element) => total + element.hours), 0))
@@ -476,6 +452,9 @@ Template.detailtimetable.helpers({
   totalDetailTimeEntries() {
     return Template.instance().totalDetailTimeEntries
   },
+  request: () => Template.instance().request,
+  tableHidden: () => !Template.instance().request.ready() || !Template.instance().request.rendered.get(),
+  tableInert: () => (!Template.instance().request.ready() || !Template.instance().request.rendered.get() ? '' : null),
   tcid() { return Template.instance().tcid },
   showInvoiceButton: () => (getGlobalSetting('enableSiwapp') && getUserSetting('siwappurl')),
   showMarkAsBilledButton: () => (getGlobalSetting('useState') && (!getGlobalSetting('enableSiwapp') || !getUserSetting('siwappurl'))),
@@ -488,128 +467,11 @@ Template.detailtimetable.helpers({
 Template.detailtimetable.events({
   'click .js-export-csv': (event, templateInstance) => {
     event.preventDefault()
-    const csvRows = [[t('globals.project'), t('globals.date'), t('globals.task')]]
-    if (getGlobalSetting('showResourceInDetails')) {
-      csvRows[0].push(t('globals.resource'))
-    }
-    if (getGlobalSetting('showCustomFieldsInDetails')) {
-      if (CustomFields.find({ classname: 'time_entry' }).count() > 0) {
-        csvRows[0].push(...CustomFields.find({ classname: 'time_entry' }).fetch()
-          .map((field) => field[customFieldType]))
-      }
-      if (CustomFields.find({ classname: 'project' }).count() > 0) {
-        csvRows[0].push(...CustomFields.find({ classname: 'project' }).fetch()
-          .map((field) => field[customFieldType]))
-      }
-    }
-    if (getGlobalSetting('showCustomerInDetails')) {
-      csvRows[0].push(t('globals.customer'))
-    }
-    if (getGlobalSetting('useState')) {
-      csvRows[0].push(t('details.state'))
-    }
-    if (getGlobalSetting('useStartTime')) {
-      csvRows[0].push(t('details.startTime'), t('details.endTime'))
-    }
-    csvRows[0].push(getUserTimeUnitVerbose())
-    if (getGlobalSetting('showRateInDetails')) {
-      csvRows[0].push(t('project.rate'))
-    }
-    const selector = structuredClone(templateInstance.selector.get()[0])
-    selector.state = { $in: ['new', undefined] }
-    for (const timeEntry of Timecards
-      .find(templateInstance.selector.get()[0], templateInstance.selector.get()[1])
-      .fetch().map((entry) => detailedDataTableMapper(entry, true))) {
-      const row = []
-      for (const attribute of timeEntry) {
-        row.push(attribute)
-      }
-      row.splice(row.length - 1, 1)
-      if (getGlobalSetting('useState') && !getGlobalSetting('useStartTime') && !getGlobalSetting('showRateInDetails')) {
-        row[row.length - 2] = t(`details.${timeEntry[timeEntry.length - 3] ? timeEntry[timeEntry.length - 3] : 'new'}`)
-      } else if (getGlobalSetting('useState') && getGlobalSetting('useStartTime') && !getGlobalSetting('showRateInDetails')) {
-        row[row.length - 4] = t(`details.${timeEntry[timeEntry.length - 5] ? timeEntry[timeEntry.length - 5] : 'new'}`)
-      }
-      else if (getGlobalSetting('useState') && getGlobalSetting('useStartTime') && getGlobalSetting('showRateInDetails')) {
-        row[row.length - 5] = t(`details.${timeEntry[timeEntry.length - 6] ? timeEntry[timeEntry.length - 6] : 'new'}`)
-      }
-      csvRows.push(row)
-    }
-    saveAs(
-      new Blob([encodeCsv(csvRows)], { type: 'text/csv;charset=utf-8;header=present' }),
-      `titra_export_${dayjs().format('YYYYMMDD-HHmm')}_${$('#resourceselect option:selected').text().replace(' ', '_').toLowerCase()}.csv`,
-    )
-    Meteor.call('setTimeEntriesState', { timeEntries: Timecards.find(selector, templateInstance.selector.get()[1]).fetch().map((entry) => entry._id), state: 'exported' }, (error) => {
-      if (error) {
-        console.error(error)
-      }
-    })
+    return templateInstance.exportController.run('csv')
   },
-  'click .js-export-xlsx': async (event, templateInstance) => {
+  'click .js-export-xlsx': (event, templateInstance) => {
     event.preventDefault()
-    const data = [[t('globals.project'), t('globals.date'), t('globals.task')]]
-    if (getGlobalSetting('showResourceInDetails')) {
-      data[0].push(t('globals.resource'))
-    }
-    if (getGlobalSetting('showCustomFieldsInDetails')) {
-      if (CustomFields.find({ classname: 'time_entry' }).count() > 0) {
-        for (const customfield of CustomFields.find({ classname: 'time_entry' }).fetch()) {
-          data[0].push(customfield[customFieldType])
-        }
-      }
-      if (CustomFields.find({ classname: 'project' }).count() > 0) {
-        for (const customfield of CustomFields.find({ classname: 'project' }).fetch()) {
-          data[0].push(customfield[customFieldType])
-        }
-      }
-    }
-    if (getGlobalSetting('showCustomerInDetails')) {
-      data[0].push(t('globals.customer'))
-    }
-    if (getGlobalSetting('useState')) {
-      data[0].push(t('details.state'))
-    }
-    if (getGlobalSetting('useStartTime')) {
-      data[0].push(t('details.startTime'))
-      data[0].push(t('details.endTime'))
-    }
-    data[0].push(getUserTimeUnitVerbose())
-    if (getGlobalSetting('showRateInDetails')) {
-      data[0].push(t('project.rate'))
-    }
-    const selector = structuredClone(templateInstance.selector.get()[0])
-    selector.state = { $in: ['new', undefined] }
-    for (const timeEntry of Timecards
-      .find(templateInstance.selector.get()[0], templateInstance.selector.get()[1]).fetch()
-      .map((entry) => detailedDataTableMapper(entry, true))) {
-      const row = []
-      let index = 0
-      timeEntry.splice(timeEntry.length - 1, 1)
-      for (const attribute of timeEntry) {
-        if (index === timeEntry.length - 2 && getGlobalSetting('useState') && !getGlobalSetting('useStartTime') && !getGlobalSetting('showRateInDetails')) {
-          row.push(t(`details.${attribute !== undefined ? attribute : 'new'}`))
-        } else if (index === timeEntry.length - 4 && getGlobalSetting('useState') && getGlobalSetting('useStartTime') && !getGlobalSetting('showRateInDetails')) {
-          row.push(t(`details.${attribute !== undefined ? attribute : 'new'}`))
-        } else if (index === timeEntry.length - 5 && getGlobalSetting('useState') && getGlobalSetting('useStartTime') && getGlobalSetting('showRateInDetails')) {
-          row.push(t(`details.${attribute !== undefined ? attribute : 'new'}`))
-        }
-        else {
-          row.push(attribute || '')
-        }
-        index += 1
-      }
-      data.push(row)
-    }
-    await exportSheetToXlsx(
-      data,
-      'titra export',
-      `titra_export_${dayjs().format('YYYYMMDD-HHmm')}_${$('#resourceselect option:selected').text().replace(' ', '_').toLowerCase()}.xlsx`,
-    )
-    Meteor.call('setTimeEntriesState', { timeEntries: Timecards.find(selector, templateInstance.selector.get()[1]).fetch().map((entry) => entry._id), state: 'exported' }, (error) => {
-      if (error) {
-        console.error(error)
-      }
-    })
+    return templateInstance.exportController.run('xlsx')
   },
   'click .js-track-time': (event, templateInstance) => {
     event.preventDefault()
@@ -635,8 +497,9 @@ Template.detailtimetable.events({
       }
     })
   },
-  'click .js-invoice': (event) => {
+  'click .js-invoice': (event, templateInstance) => {
     event.preventDefault()
+    if (!templateInstance.request.ready()) return
     if (getUserSetting('siwappurl')) {
       Meteor.call('sendToSiwapp', {
         projectId: $('.js-projectselect').val(),
@@ -658,6 +521,7 @@ Template.detailtimetable.events({
   },
   'click .js-mark-billed': (event, templateInstance) => {
     event.preventDefault()
+    if (!templateInstance.request.ready()) return
     const selector = structuredClone(templateInstance.selector.get()[0])
     selector.state = { $ne: 'notBillable' }
     Meteor.call('setTimeEntriesState', { timeEntries: Timecards.find(selector, templateInstance.selector.get()[1]).fetch().map((entry) => entry._id), state: 'billed' }, (error) => {
@@ -670,6 +534,7 @@ Template.detailtimetable.events({
   },
   'click .js-delete': (event, templateInstance) => {
     event.preventDefault()
+    if (!templateInstance.request.ready()) return
     if (confirm(t('notifications.delete_confirm'))) {
       Meteor.call('deleteTimeCard', { timecardId: templateInstance.$(event.currentTarget).data('id') }, (error, result) => {
         if (!error) {
@@ -685,6 +550,7 @@ Template.detailtimetable.events({
   },
   'click .js-edit': (event, templateInstance) => {
     event.preventDefault()
+    if (!templateInstance.request.ready()) return
     templateInstance.tcid.set(templateInstance.$(event.currentTarget).data('id'))
     new Modal($('#edit-tc-entry-modal')[0], { focus: false }).show()
   },
@@ -734,13 +600,18 @@ Template.detailtimetable.events({
   },
   'mouseup .dt-cell--header > .dt-cell__content': (event, templateInstance) => {
     event.preventDefault()
+    const requestSequence = templateInstance.request.generation()
     window.setTimeout(() => {
+      if (!templateInstance.request.current(requestSequence)
+        || !templateInstance.request.ready() || !templateInstance.datatable) return
       templateInstance.datatable.setDimensions()
-      templateInstance.$('.dt-scrollable').height(`${parseInt(document.querySelector('.dt-row.vrow:last-of-type')?.style.top, 10) + 40}px`)
+      const top = Number.parseInt(templateInstance.find('.dt-row.vrow:last-of-type')?.style.top, 10)
+      templateInstance.$('.dt-scrollable').height(Number.isFinite(top) ? `${top + 40}px` : 'auto')
     }, 100)
   },
   'click .js-outbound-interface': (event, templateInstance) => {
     event.preventDefault()
+    if (!templateInstance.request.ready()) return
     Meteor.call('outboundinterfaces.run', { data: Timecards.find(structuredClone(templateInstance.selector.get()[0]), templateInstance.selector.get()[1]).fetch().map((entry) => detailedDataTableMapper(entry, true)), _id: templateInstance.$(event.currentTarget).data('interface-id') }, (error, result) => {
       if (error) {
         showToast(error)
@@ -752,11 +623,8 @@ Template.detailtimetable.events({
   },
 })
 Template.detailtimetable.onDestroyed(() => {
+  Template.instance().exportController.dispose()
+  Template.instance().request.dispose()
   FlowRouter.setQueryParams({ page: null })
-  try {
-    Template.instance().datatable?.destroy()
-  } catch (error) {
-    console.error(error)
-  }
-  Template.instance().datatable = undefined
+  Template.instance().tableRenderer?.destroy()
 })

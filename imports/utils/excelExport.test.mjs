@@ -68,6 +68,21 @@ test('XLSX dates remain numeric Excel dates rather than host-timezone formatted 
   assert.equal(instant.toISOString(), '2026-09-22T00:00:00.000Z')
 })
 
+test('XLSX final download guard can cancel after compression without saving', async () => {
+  const count = downloads.length
+  const cancelled = new Error('Export cancelled')
+  let guarded = false
+  await assert.rejects(exportSheetToXlsx([['Hours'], [1.237]], 'data', 'cancelled.xlsx', {
+    beforeSave() { guarded = true; throw cancelled },
+  }), (error) => error === cancelled)
+  assert.equal(guarded, true)
+  assert.equal(downloads.length, count)
+  await exportSheetToXlsx([['Hours'], [1.237]], 'data', 'allowed.xlsx', {
+    beforeSave() { assert.equal(downloads.length, count) },
+  })
+  assert.equal(downloads.length, count + 1)
+})
+
 test('XLSX filters include columns beyond Z and empty/header-only exports remain valid', async () => {
   const wide = await exportArchive([Array(28).fill('Header'), Array(28).fill(1)])
   assert.match(wide.readAsText('xl/worksheets/sheet1.xml'), /<autoFilter ref="A1:AB2"\/>/)

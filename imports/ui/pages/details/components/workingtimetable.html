@@ -3,8 +3,8 @@
     <div class="col-lg-3 col-4">
       <div class="btn-group">
         {{#if workingTimeEntries}}
-          <button type="button" class="btn btn-secondary border js-export-csv"><i class="fa fa-download"></i> <span class="d-none d-md-inline">CSV</span></button>
-          <button type="button" class="btn btn-secondary border js-export-xlsx"><i class="fa fa-download"></i> <span class="d-none d-md-inline">Excel</span></button>
+          <button type="button" class="btn btn-secondary border js-export-csv" disabled="{{exportBusy}}"><i class="fa fa-download"></i> <span class="d-none d-md-inline">CSV</span></button>
+          <button type="button" class="btn btn-secondary border js-export-xlsx" disabled="{{exportBusy}}"><i class="fa fa-download"></i> <span class="d-none d-md-inline">Excel</span></button>
         {{else}}
           <button type="button" class="btn btn-secondary border js-export-csv" disabled><i class="fa fa-download"></i> <span class="d-none d-md-inline">CSV</span></button>
           <button type="button" class="btn btn-secondary border js-export-xlsx" disabled><i class="fa fa-download"></i> <span class="d-none d-md-inline">Excel</span></button>
@@ -15,7 +15,9 @@
       {{>limitpicker}}
     </div> -->
   </div>
-  <div id="datatable-container" class="mt-3 mb-3"></div>
+  {{>exportControls controller=exportController}}
+  {{>tableRequestFeedback request=request}}
+  <div id="datatable-container" class="mt-3 mb-3 {{#if tableHidden}}invisible{{/if}}" aria-hidden="{{tableHidden}}" inert="{{tableInert}}"></div>
   <div class="col-md-3 ms-md-auto"> 
     {{>limitpicker}}
 </div>

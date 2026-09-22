@@ -1,42 +1,51 @@
 import dayjs from 'dayjs'
 import utc from 'dayjs/plugin/utc'
-import { saveAs } from 'file-saver'
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra'
 import { normalizePageParameter } from '../../../../utils/pageParameter.js'
+import { tableRendererForTemplate } from './detailsTableRenderer.js'
+import { normalizeLimitParameter } from '../../../../utils/limitParameter.js'
+import { createDetailsRequestState } from '../../../../utils/detailsRequestState.js'
 import { i18nReady, t } from '../../../../utils/i18n.js'
-import { exportSheetToXlsx } from '../../../../utils/excelExport.js'
 import {
   addToolTipToTableCell,
   getGlobalSetting,
   numberWithUserPrecision,
   getUserSetting,
-  waitForElement,
 } from '../../../../utils/frontend_helpers'
 import './workingtimetable.html'
 import './pagination.js'
 import './limitpicker.js'
-import { encodeCsv } from '../../../../utils/csvExport.js'
+import './tableRequestFeedback.js'
+import { createExportForTemplate } from './exportControls.js'
 import { secureDataTableColumns } from '../../../../utils/dataTableSecurity.js'
 
 Template.workingtimetable.onCreated(function workingtimetableCreated() {
   dayjs.extend(utc)
   this.workingTimeEntries = new ReactiveVar()
   this.totalWorkingTimeEntries = new ReactiveVar()
-  this.requestSequence = 0
+  this.request = createDetailsRequestState({
+    ReactiveVar, rows: this.workingTimeEntries, total: this.totalWorkingTimeEntries,
+    dependenciesReady: () => this.projectUsersHandle?.ready(),
+  })
+  this.exportController = createExportForTemplate(this, 'working', () => this.workingTimeEntries.get() || [])
   this.autorun(() => {
+    this.request.retry.get()
     if (this.data?.project.get()
       && this.data?.resource.get()
       && this.data?.period.get()
       && this.data?.limit.get()) {
-      this.totalWorkingTimeEntries.set(undefined)
-      const requestSequence = ++this.requestSequence
+      const requestSequence = this.request.begin()
       this.subscribe('userRoles')
-      this.projectUsersHandle = this.subscribe('projectResources', { projectId: this.data?.project.get() })
+      this.projectUsersHandle = this.subscribe('projectResources', { projectId: this.data?.project.get() }, {
+        onStop: (error) => {
+          if (error && this.request.fail(requestSequence)) console.error(error)
+        },
+      })
       const methodParameters = {
         projectId: this.data?.project.get(),
         userId: this.data?.resource.get(),
         period: this.data?.period.get(),
-        limit: this.data?.limit.get(),
+        limit: normalizeLimitParameter(this.data?.limit.get()),
         page: normalizePageParameter(FlowRouter.getQueryParam('page')),
       }
       if (this.data?.period.get() === 'custom') {
@@ -45,13 +54,17 @@ Template.workingtimetable.onCreated(function workingtimetableCreated() {
           endDate: getUserSetting('customEndDate') ? getUserSetting('customEndDate') : dayjs.utc().toDate(),
         }
       }
+      this.exportQuery = methodParameters
       Meteor.call('getWorkingHoursForPeriod', methodParameters, (error, result) => {
-        if (requestSequence !== this.requestSequence) return
+        if (!this.request.current(requestSequence)) return
         if (error) {
+          this.request.fail(requestSequence)
           console.error(error)
         } else {
-          this.workingTimeEntries.set(result.workingHours.sort((a, b) => a.date - b.date))
-          this.totalWorkingTimeEntries.set(result.totalEntries)
+          this.request.complete(requestSequence, () => {
+            this.workingTimeEntries.set(result.workingHours.sort((a, b) => a.date - b.date))
+            this.totalWorkingTimeEntries.set(result.totalEntries)
+          })
         }
       })
     }
@@ -59,9 +72,10 @@ Template.workingtimetable.onCreated(function workingtimetableCreated() {
 })
 Template.workingtimetable.onRendered(() => {
   const templateInstance = Template.instance()
+  templateInstance.tableRenderer = tableRendererForTemplate(templateInstance)
   templateInstance.autorun(() => {
-    if (i18nReady.get()) {
-      let data
+    if (i18nReady.get() && templateInstance.request.ready()) {
+      let data = []
       if (templateInstance.workingTimeEntries.get()) {
         data = templateInstance.workingTimeEntries.get()
           .map((entry) => Object.entries(entry)
@@ -82,60 +96,37 @@ Template.workingtimetable.onRendered(() => {
         { name: t('details.totalTime'), editable: false, format: numberWithUserPrecision },
         { name: t('details.regularWorkingTime'), editable: false, format: numberWithUserPrecision },
         { name: t('details.regularWorkingTimeDifference'), editable: false, format: numberWithUserPrecision }]
-      const securedColumns = secureDataTableColumns(columns)
-      if (!templateInstance.datatable) {
-        import('frappe-datatable/dist/frappe-datatable.css').then(() => {
-          import('frappe-datatable').then((datatable) => {
-            const DataTable = datatable.default
-            try {
-              templateInstance.datatable = new DataTable('#datatable-container', {
-                columns: securedColumns,
-                serialNoColumn: false,
-                clusterize: false,
-                layout: 'ratio',
-                showTotalRow: true,
-                data,
-                noDataMessage: t('tabular.sZeroRecords'),
-              })
-            } catch (error) {
-              console.error(`Caught error: ${error}`)
-            }
-          })
-        })
-      }
-      if (templateInstance.datatable && templateInstance.workingTimeEntries.get()
-        && window.BootstrapLoaded.get()) {
-        try {
-          templateInstance.datatable.refresh(data, securedColumns)
-        } catch (error) {
-          console.error(`Caught error: ${error}`)
-        }
-        if (templateInstance.workingTimeEntries.get().length === 0) {
-          $('.dt-scrollable').height('auto')
-        } else {
-          waitForElement(undefined, '.dt-scrollable').then((element) => {
-            $(element).height(`${parseInt(document.querySelector('.dt-row.vrow:last-of-type')?.style.top, 10) + 40}px`)
-            element.style.overflow = 'hidden'
-          })
-        }
-      }
+      templateInstance.tableRenderer.render({
+        columns: secureDataTableColumns(columns),
+        serialNoColumn: false,
+        clusterize: false,
+        layout: 'ratio',
+        showTotalRow: true,
+        data,
+        noDataMessage: t('tabular.sZeroRecords'),
+      })
     }
   })
 })
 Template.workingtimetable.helpers({
+  exportController: () => Template.instance().exportController,
+  exportBusy: () => Template.instance().exportController.busy.get(),
   workingTimeEntries() {
-    return Template.instance().workingTimeEntries.get()
+    return Template.instance().request.hasRows()
   },
+  request: () => Template.instance().request,
+  tableHidden: () => !Template.instance().request.ready() || !Template.instance().request.rendered.get(),
+  tableInert: () => (!Template.instance().request.ready() || !Template.instance().request.rendered.get() ? '' : null),
   workingTimeSum() {
-    return Template.instance().workingTimeEntries.get()
+    return (Template.instance().workingTimeEntries.get() || [])
       .reduce(((total, element) => total + element.totalTime), 0)
   },
   regularWorkingTimeSum() {
-    return Template.instance().workingTimeEntries.get()
+    return (Template.instance().workingTimeEntries.get() || [])
       .reduce(((total, element) => total + element.regularWorkingTime), 0)
   },
   regularWorkingTimeDifferenceSum() {
-    return Template.instance().workingTimeEntries.get()
+    return (Template.instance().workingTimeEntries.get() || [])
       .reduce(((total, element) => total + element.regularWorkingTimeDifference), 0)
   },
   totalWorkingTimeEntries() {
@@ -145,33 +136,16 @@ Template.workingtimetable.helpers({
 Template.workingtimetable.events({
   'click .js-export-csv': (event, templateInstance) => {
     event.preventDefault()
-    const csvRows = [[
-      t('globals.date'), t('globals.resource'), t('details.startTime'),
-      t('details.breakStartTime'), t('details.breakEndTime'), t('details.endTime'),
-      t('details.totalTime'), t('details.regularWorkingTime'),
-      t('details.regularWorkingTimeDifference'),
-    ]]
-    for (const timeEntry of templateInstance.workingTimeEntries.get()) {
-      csvRows.push([
-        dayjs.utc(timeEntry.date).format(getGlobalSetting('dateformat')),
-        timeEntry.resource, timeEntry.startTime, timeEntry.breakStartTime,
-        timeEntry.breakEndTime, timeEntry.endTime, timeEntry.totalTime,
-        timeEntry.regularWorkingTime, timeEntry.regularWorkingTimeDifference,
-      ])
-    }
-    saveAs(new Blob([encodeCsv(csvRows)], { type: 'text/csv;charset=utf-8;header=present' }), `titra_working_time_${templateInstance.data.period.get()}.csv`)
+    return templateInstance.exportController.run('csv')
   },
-  'click .js-export-xlsx': async (event, templateInstance) => {
+  'click .js-export-xlsx': (event, templateInstance) => {
     event.preventDefault()
-    const data = [[t('globals.date'), t('globals.resource'), t('details.startTime'), t('details.breakStartTime'), t('details.breakEndTime'), t('details.endTime'), t('details.totalTime'), t('details.regularWorkingTime'), t('details.regularWorkingTimeDifference')]]
-    for (const timeEntry of templateInstance.workingTimeEntries.get()) {
-      data.push([dayjs.utc(timeEntry.date).format(getGlobalSetting('dateformat')), timeEntry.resource, timeEntry.startTime, timeEntry.breakStartTime, timeEntry.breakEndTime, timeEntry.endTime, timeEntry.totalTime, timeEntry.regularWorkingTime, timeEntry.regularWorkingTimeDifference])
-    }
-    await exportSheetToXlsx(data, 'working time', `titra_working_time_${templateInstance.data.period.get()}.xlsx`)
+    return templateInstance.exportController.run('xlsx')
   },
 })
 Template.workingtimetable.onDestroyed(() => {
+  Template.instance().exportController.dispose()
+  Template.instance().request.dispose()
   FlowRouter.setQueryParams({ page: null })
-  Template.instance().datatable.destroy()
-  Template.instance().datatable = undefined
+  Template.instance().tableRenderer?.destroy()
 })

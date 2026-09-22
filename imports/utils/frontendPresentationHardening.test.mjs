@@ -47,6 +47,9 @@ test('remote changelog and legacy descriptions are converted to text', () => {
 })
 
 test('all four audited CSV exports use the centralized safe encoder', () => {
+  const adapter = source('imports/ui/pages/details/components/exportControls.js')
+  assert.match(adapter, /import \{ encodeCsv \}/u)
+  assert.match(adapter, /new Blob\(\[encodeCsv\(data\)\]/u)
   for (const relativePath of [
     'imports/ui/pages/details/components/detailtimetable.js',
     'imports/ui/pages/details/components/dailytimetable.js',
@@ -54,8 +57,10 @@ test('all four audited CSV exports use the centralized safe encoder', () => {
     'imports/ui/pages/details/components/workingtimetable.js',
   ]) {
     const file = source(relativePath)
-    assert.match(file, /import \{ encodeCsv \}/u, relativePath)
-    assert.match(file, /new Blob\(\[encodeCsv\(csvRows\)\]/u, relativePath)
+    assert.match(file, /import \{ createExportForTemplate \} from '\.\/exportControls\.js'/u, relativePath)
+    assert.match(file, /this\.exportController = createExportForTemplate\(this,/u, relativePath)
+    assert.match(file, /exportController\.run\('csv'\)/u, relativePath)
+    assert.doesNotMatch(file, /new Blob\(/u, relativePath)
   }
 })
 

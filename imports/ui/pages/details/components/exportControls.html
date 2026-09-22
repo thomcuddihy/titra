@@ -1,0 +1,18 @@
+<template name="exportControls">
+  <div class="d-print-none mt-3">
+    <div class="d-flex flex-wrap align-items-center gap-2 mb-1" role="group" aria-label="{{t 'details.exportScope'}}">
+      <span>{{t "details.exportScope"}}</span>
+      <button type="button" class="btn btn-sm {{#if selected 'current'}}btn-primary{{else}}btn-secondary{{/if}} js-export-scope" data-scope="current" aria-pressed="{{selected 'current'}}" disabled="{{busy}}">{{t "details.exportCurrent"}}</button>
+      <button type="button" class="btn btn-sm {{#if selected 'all'}}btn-primary{{else}}btn-secondary{{/if}} js-export-scope" data-scope="all" aria-pressed="{{selected 'all'}}" disabled="{{busy}}">{{t "details.exportAll"}}</button>
+    </div>
+    <div class="small">{{t "details.exportLimits"}}</div>
+    {{#if busy}}
+      <div role="status" class="mt-2">
+        {{progress}}
+        {{#if canCancel}}<button type="button" class="btn btn-secondary btn-sm ms-2 js-cancel-export">{{t "globals.cancel"}}</button>{{/if}}
+      </div>
+    {{/if}}
+    {{#if completed}}<div class="alert alert-success mt-2" role="status">{{completed}}</div>{{/if}}
+    {{#if error}}<div class="alert alert-warning mt-2" role="alert">{{error}}</div>{{/if}}
+  </div>
+</template>

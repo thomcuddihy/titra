@@ -2,11 +2,14 @@ import dayjs from 'dayjs'
 import utc from 'dayjs/plugin/utc'
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra'
 import { normalizePageParameter } from '../../../../utils/pageParameter.js'
-import { saveAs } from 'file-saver'
+import { tableRendererForTemplate } from './detailsTableRenderer.js'
+import { normalizeLimitParameter } from '../../../../utils/limitParameter.js'
+import { createDetailsRequestState } from '../../../../utils/detailsRequestState.js'
 import './dailytimetable.html'
 import './pagination.js'
 import './limitpicker.js'
-import { exportSheetToXlsx } from '../../../../utils/excelExport.js'
+import './tableRequestFeedback.js'
+import { createExportForTemplate } from './exportControls.js'
 import {
   getGlobalSetting,
   numberWithUserPrecision,
@@ -14,33 +17,39 @@ import {
   getUserTimeUnitVerbose,
   addToolTipToTableCell,
   dailyTimecardMapper,
-  waitForElement,
   showToast
 } from '../../../../utils/frontend_helpers'
 import { i18nReady, t } from '../../../../utils/i18n.js'
-import { encodeCsv } from '../../../../utils/csvExport.js'
 import { secureDataTableColumns } from '../../../../utils/dataTableSecurity.js'
 
 Template.dailytimetable.onCreated(function dailytimetablecreated() {
   dayjs.extend(utc)
   this.dailyTimecards = new ReactiveVar()
   this.totalEntries = new ReactiveVar()
-  this.requestSequence = 0
+  this.request = createDetailsRequestState({
+    ReactiveVar, rows: this.dailyTimecards, total: this.totalEntries,
+    dependenciesReady: () => this.projectUsersHandle?.ready(),
+  })
+  this.exportController = createExportForTemplate(this, 'daily', () => this.dailyTimecards.get() || [])
   this.outboundInterfaces = new ReactiveVar([])
   this.autorun(() => {
+    this.request.retry.get()
     if (this.data?.project.get()
       && this.data?.resource.get()
       && this.data?.period.get()
       && this.data?.limit.get()
       && this.data?.customer.get()) {
-      this.totalEntries.set(undefined)
-      const requestSequence = ++this.requestSequence
-      this.projectUsersHandle = this.subscribe('projectResources', { projectId: this.data?.project.get() })
+      const requestSequence = this.request.begin()
+      this.projectUsersHandle = this.subscribe('projectResources', { projectId: this.data?.project.get() }, {
+        onStop: (error) => {
+          if (error && this.request.fail(requestSequence)) console.error(error)
+        },
+      })
       const methodParameters = {
         projectId: this.data?.project.get(),
         userId: this.data?.resource.get(),
         period: this.data?.period.get(),
-        limit: this.data?.limit.get(),
+        limit: normalizeLimitParameter(this.data?.limit.get()),
         customer: this.data?.customer.get(),
         page: normalizePageParameter(FlowRouter.getQueryParam('page')),
       }
@@ -50,13 +59,17 @@ Template.dailytimetable.onCreated(function dailytimetablecreated() {
           endDate: getUserSetting('customEndDate') ? getUserSetting('customEndDate') : dayjs.utc().toDate(),
         }
       }
+      this.exportQuery = methodParameters
       Meteor.call('getDailyTimecards', methodParameters, (error, result) => {
-        if (requestSequence !== this.requestSequence) return
+        if (!this.request.current(requestSequence)) return
         if (error) {
+          this.request.fail(requestSequence)
           console.error(error)
         } else {
-          this.dailyTimecards.set(result.dailyHours.sort((a, b) => b._id.date - a._id.date))
-          this.totalEntries.set(result.totalEntries)
+          this.request.complete(requestSequence, () => {
+            this.dailyTimecards.set(result.dailyHours.sort((a, b) => b._id.date - a._id.date))
+            this.totalEntries.set(result.totalEntries)
+          })
         }
       })
     }
@@ -72,8 +85,9 @@ Template.dailytimetable.onCreated(function dailytimetablecreated() {
 })
 Template.dailytimetable.onRendered(() => {
   const templateInstance = Template.instance()
+  templateInstance.tableRenderer = tableRendererForTemplate(templateInstance)
   templateInstance.autorun(() => {
-    if (i18nReady.get()) {
+    if (i18nReady.get() && templateInstance.request.ready()) {
       let data = []
       if (templateInstance.dailyTimecards.get() && templateInstance.projectUsersHandle.ready()) {
         data = templateInstance.dailyTimecards.get().map(dailyTimecardMapper)
@@ -110,94 +124,40 @@ Template.dailytimetable.onRendered(() => {
           format: numberWithUserPrecision,
         },
       )
-      const securedColumns = secureDataTableColumns(columns)
-      if (!templateInstance.datatable) {
-        import('frappe-datatable/dist/frappe-datatable.css').then(() => {
-          import('frappe-datatable').then((datatable) => {
-            const DataTable = datatable.default
-            try {
-              templateInstance.datatable = new DataTable('#datatable-container', {
-                columns: securedColumns,
-                serialNoColumn: false,
-                clusterize: false,
-                layout: 'ratio',
-                showTotalRow: true,
-                data,
-                noDataMessage: t('tabular.sZeroRecords'),
-              })
-            } catch (error) {
-              console.error(`Caught error: ${error}`)
-            }
-          })
-        })
-      }
-      if (templateInstance.datatable && templateInstance.dailyTimecards.get()
-        && window.BootstrapLoaded.get() && data.length > 0) {
-        try {
-          templateInstance.datatable.refresh(data, securedColumns)
-        } catch (error) {
-          console.error(`Caught error: ${error}`)
-        }
-        if (templateInstance.dailyTimecards.get().length === 0) {
-          $('.dt-scrollable').height('auto')
-        } else {
-          waitForElement(undefined, '.dt-scrollable').then((element) => {
-            $(element).height(`${parseInt(document.querySelector('.dt-row.vrow:last-of-type')?.style.top, 10) + 40}px`)
-            element.style.overflow = 'hidden'
-          })
-        }
-      }
+      templateInstance.tableRenderer.render({
+        columns: secureDataTableColumns(columns),
+        serialNoColumn: false,
+        clusterize: false,
+        layout: 'ratio',
+        showTotalRow: true,
+        data,
+        noDataMessage: t('tabular.sZeroRecords'),
+      })
     }
   })
 })
 Template.dailytimetable.helpers({
-  dailyTimecards: () => Template.instance().dailyTimecards.get(),
+  exportController: () => Template.instance().exportController,
+  exportBusy: () => Template.instance().exportController.busy.get(),
+  dailyTimecards: () => Template.instance().request.hasRows(),
+  request: () => Template.instance().request,
+  tableHidden: () => !Template.instance().request.ready() || !Template.instance().request.rendered.get(),
+  tableInert: () => (!Template.instance().request.ready() || !Template.instance().request.rendered.get() ? '' : null),
   totalEntries: () => Template.instance().totalEntries,
   outboundInterfaces: () => Template.instance().outboundInterfaces?.get(),
 })
 Template.dailytimetable.events({
   'click .js-export-csv': (event, templateInstance) => {
     event.preventDefault()
-    let unit = t('globals.hour_plural')
-    if (Meteor.user()) {
-      unit = getUserTimeUnitVerbose()
-    }
-    const showResource = getGlobalSetting('showResourceInDetails')
-    const csvRows = [[t('globals.date'), t('globals.project')]]
-    if (showResource) csvRows[0].push(t('globals.resource'))
-    csvRows[0].push(unit)
-    for (const timeEntry of templateInstance.dailyTimecards.get().map(dailyTimecardMapper)) {
-      const row = [
-        dayjs.utc(timeEntry.date).format(getGlobalSetting('dateformat')),
-        timeEntry.projectId,
-      ]
-      if (showResource) row.push(timeEntry.userId)
-      row.push(timeEntry.totalHours)
-      csvRows.push(row)
-    }
-    saveAs(new Blob([encodeCsv(csvRows)], { type: 'text/csv;charset=utf-8;header=present' }), `titra_daily_time_${templateInstance.data.period.get()}.csv`)
+    return templateInstance.exportController.run('csv')
   },
-  'click .js-export-xlsx': async (event, templateInstance) => {
+  'click .js-export-xlsx': (event, templateInstance) => {
     event.preventDefault()
-    let unit = t('globals.hour_plural')
-    if (Meteor.user()) {
-      unit = getUserTimeUnitVerbose()
-    }
-    let data = [[t('globals.date'), t('globals.project'), t('globals.resource'), unit]]
-    if (!getGlobalSetting('showResourceInDetails')) {
-      data = [[t('globals.date'), t('globals.project'), unit]]
-    }
-    for (const timeEntry of templateInstance.dailyTimecards.get().map(dailyTimecardMapper)) {
-      if (getGlobalSetting('showResourceInDetails')) {
-        data.push([dayjs.utc(timeEntry.date).format(getGlobalSetting('dateformat')), timeEntry.projectId, timeEntry.userId, timeEntry.totalHours])
-      } else {
-        data.push([dayjs.utc(timeEntry.date).format(getGlobalSetting('dateformat')), timeEntry.projectId, timeEntry.totalHours])
-      }
-    }
-    await exportSheetToXlsx(data, 'daily', `titra_daily_time_${templateInstance.data.period.get()}.xlsx`)
+    return templateInstance.exportController.run('xlsx')
   },
   'click .js-outbound-interface': (event, templateInstance) => {
     event.preventDefault()
+    if (!templateInstance.request.hasRows()) return
     Meteor.call('outboundinterfaces.run', { data: templateInstance.dailyTimecards.get().map(dailyTimecardMapper), _id: templateInstance.$(event.currentTarget).data('interface-id') }, (error, result) => {
       if (error) {
         showToast(error)
@@ -209,7 +169,8 @@ Template.dailytimetable.events({
   },
 })
 Template.dailytimetable.onDestroyed(() => {
+  Template.instance().exportController.dispose()
+  Template.instance().request.dispose()
   FlowRouter.setQueryParams({ page: null })
-  Template.instance().datatable.destroy()
-  Template.instance().datatable = undefined
+  Template.instance().tableRenderer?.destroy()
 })

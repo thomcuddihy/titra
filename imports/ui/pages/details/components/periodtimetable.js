@@ -1,12 +1,15 @@
 import dayjs from 'dayjs'
 import utc from 'dayjs/plugin/utc'
-import { saveAs } from 'file-saver'
 import { FlowRouter } from 'meteor/ostrio:flow-router-extra'
 import { normalizePageParameter } from '../../../../utils/pageParameter.js'
+import { tableRendererForTemplate } from './detailsTableRenderer.js'
+import { normalizeLimitParameter } from '../../../../utils/limitParameter.js'
+import { createDetailsRequestState } from '../../../../utils/detailsRequestState.js'
 import './periodtimetable.html'
 import './pagination.js'
 import './limitpicker.js'
-import { exportSheetToXlsx } from '../../../../utils/excelExport.js'
+import './tableRequestFeedback.js'
+import { createExportForTemplate } from './exportControls.js'
 import { i18nReady, t } from '../../../../utils/i18n.js'
 import {
   numberWithUserPrecision,
@@ -14,34 +17,40 @@ import {
   getUserTimeUnitVerbose,
   addToolTipToTableCell,
   totalHoursForPeriodMapper,
-  waitForElement,
   getGlobalSetting,
   showToast,
 } from '../../../../utils/frontend_helpers.js'
-import { encodeCsv } from '../../../../utils/csvExport.js'
 import { secureDataTableColumns } from '../../../../utils/dataTableSecurity.js'
 
 Template.periodtimetable.onCreated(function periodtimetableCreated() {
   dayjs.extend(utc)
   this.periodTimecards = new ReactiveVar()
   this.totalPeriodTimeCards = new ReactiveVar()
-  this.requestSequence = 0
+  this.request = createDetailsRequestState({
+    ReactiveVar, rows: this.periodTimecards, total: this.totalPeriodTimeCards,
+    dependenciesReady: () => this.projectUsersHandle?.ready(),
+  })
+  this.exportController = createExportForTemplate(this, 'total', () => this.periodTimecards.get() || [])
   this.outboundInterfaces = new ReactiveVar([])
   this.autorun(() => {
+    this.request.retry.get()
     if (this.data?.project.get()
       && this.data?.resource.get()
       && this.data?.period.get()
       && this.data?.limit.get()
       && this.data?.customer.get()) {
-      this.totalPeriodTimeCards.set(undefined)
-      const requestSequence = ++this.requestSequence
-      this.projectUsersHandle = this.subscribe('projectResources', { projectId: this.data?.project.get() })
+      const requestSequence = this.request.begin()
+      this.projectUsersHandle = this.subscribe('projectResources', { projectId: this.data?.project.get() }, {
+        onStop: (error) => {
+          if (error && this.request.fail(requestSequence)) console.error(error)
+        },
+      })
       const methodParameters = {
         projectId: this.data?.project.get(),
         userId: this.data?.resource.get(),
         period: this.data?.period.get(),
         customer: this.data?.customer.get(),
-        limit: this.data?.limit.get(),
+        limit: normalizeLimitParameter(this.data?.limit.get()),
         page: normalizePageParameter(FlowRouter.getQueryParam('page')),
       }
       if (this.data?.period.get() === 'custom') {
@@ -50,13 +59,17 @@ Template.periodtimetable.onCreated(function periodtimetableCreated() {
           endDate: getUserSetting('customEndDate') ? getUserSetting('customEndDate') : dayjs.utc().toDate(),
         }
       }
+      this.exportQuery = methodParameters
       Meteor.call('getTotalHoursForPeriod', methodParameters, (error, result) => {
-        if (requestSequence !== this.requestSequence) return
+        if (!this.request.current(requestSequence)) return
         if (error) {
+          this.request.fail(requestSequence)
           console.error(error)
         } else {
-          this.periodTimecards.set(result.totalHours)
-          this.totalPeriodTimeCards.set(result.totalEntries)
+          this.request.complete(requestSequence, () => {
+            this.periodTimecards.set(result.totalHours)
+            this.totalPeriodTimeCards.set(result.totalEntries)
+          })
         }
       })
     }
@@ -72,8 +85,9 @@ Template.periodtimetable.onCreated(function periodtimetableCreated() {
 })
 Template.periodtimetable.onRendered(() => {
   const templateInstance = Template.instance()
+  templateInstance.tableRenderer = tableRendererForTemplate(templateInstance)
   templateInstance.autorun(() => {
-    if (i18nReady.get()) {
+    if (i18nReady.get() && templateInstance.request.ready()) {
       let data = []
       if (templateInstance.periodTimecards.get() && templateInstance.projectUsersHandle.ready()) {
         data = templateInstance.periodTimecards.get().map(totalHoursForPeriodMapper)
@@ -93,47 +107,27 @@ Template.periodtimetable.onRendered(() => {
         editable: false,
         format: numberWithUserPrecision,
       })
-      const securedColumns = secureDataTableColumns(columns)
-      if (!templateInstance.datatable) {
-        import('frappe-datatable/dist/frappe-datatable.css').then(() => {
-          import('frappe-datatable').then((datatable) => {
-            const DataTable = datatable.default
-            try {
-              templateInstance.datatable = new DataTable('#datatable-container', {
-                columns: securedColumns,
-                serialNoColumn: false,
-                clusterize: false,
-                layout: 'ratio',
-                showTotalRow: true,
-                data,
-                noDataMessage: t('tabular.sZeroRecords'),
-              })
-            } catch (error) {
-              console.error(`Caught error: ${error}`)
-            }
-          })
-        })
-      }
-      if (templateInstance.datatable && templateInstance.periodTimecards.get()
-        && window.BootstrapLoaded.get()) {
-        templateInstance.datatable
-          .refresh(data, securedColumns)
-        if (templateInstance.periodTimecards.get().length === 0) {
-          $('.dt-scrollable').height('auto')
-        } else {
-          waitForElement(undefined, '.dt-scrollable').then((element) => {
-            $(element).height(`${parseInt(document.querySelector('.dt-row.vrow:last-of-type')?.style.top, 10) + 40}px`)
-            element.style.overflow = 'hidden'
-          })
-        }
-      }
+      templateInstance.tableRenderer.render({
+        columns: secureDataTableColumns(columns),
+        serialNoColumn: false,
+        clusterize: false,
+        layout: 'ratio',
+        showTotalRow: true,
+        data,
+        noDataMessage: t('tabular.sZeroRecords'),
+      })
     }
   })
 })
 Template.periodtimetable.helpers({
+  exportController: () => Template.instance().exportController,
+  exportBusy: () => Template.instance().exportController.busy.get(),
   periodTimecards() {
-    return Template.instance().periodTimecards.get()
+    return Template.instance().request.hasRows()
   },
+  request: () => Template.instance().request,
+  tableHidden: () => !Template.instance().request.ready() || !Template.instance().request.rendered.get(),
+  tableInert: () => (!Template.instance().request.ready() || !Template.instance().request.rendered.get() ? '' : null),
   totalPeriodTimeCards() {
     return Template.instance().totalPeriodTimeCards
   },
@@ -142,36 +136,15 @@ Template.periodtimetable.helpers({
 Template.periodtimetable.events({
   'click .js-export-csv': (event, templateInstance) => {
     event.preventDefault()
-    const showResource = getGlobalSetting('showResourceInDetails')
-    const csvRows = [[t('globals.project')]]
-    if (showResource) csvRows[0].push(t('globals.resource'))
-    csvRows[0].push(getUserTimeUnitVerbose())
-    for (const timeEntry of templateInstance.periodTimecards.get().map(totalHoursForPeriodMapper)) {
-      const row = [timeEntry.projectId]
-      if (showResource) row.push(timeEntry.userId)
-      row.push(timeEntry.totalHours)
-      csvRows.push(row)
-    }
-    saveAs(new Blob([encodeCsv(csvRows)], { type: 'text/csv;charset=utf-8;header=present' }), `titra_total_time_${templateInstance.data.period.get()}.csv`)
+    return templateInstance.exportController.run('csv')
   },
-  'click .js-export-xlsx': async (event, templateInstance) => {
+  'click .js-export-xlsx': (event, templateInstance) => {
     event.preventDefault()
-    const data = [[t('globals.project')]]
-    if (getGlobalSetting('showResourceInDetails')) {
-      data[0].push(t('globals.resource'))
-    }
-    data[0].push(getUserTimeUnitVerbose())
-    for (const timeEntry of templateInstance.periodTimecards.get().map(totalHoursForPeriodMapper)) {
-      if (getGlobalSetting('showResourceInDetails')) {
-        data.push([timeEntry.projectId, timeEntry.userId, timeEntry.totalHours])
-      } else {
-        data.push([timeEntry.projectId, timeEntry.totalHours])
-      }
-    }
-    await exportSheetToXlsx(data, 'total time', `titra_total_time_${templateInstance.data.period.get()}.xlsx`)
+    return templateInstance.exportController.run('xlsx')
   },
   'click .js-outbound-interface': (event, templateInstance) => {
     event.preventDefault()
+    if (!templateInstance.request.hasRows()) return
     Meteor.call('outboundinterfaces.run', { data: templateInstance.periodTimecards.get().map(totalHoursForPeriodMapper), _id: templateInstance.$(event.currentTarget).data('interface-id') }, (error, result) => {
       if (error) {
         showToast(error)
@@ -183,7 +156,8 @@ Template.periodtimetable.events({
   },
 })
 Template.periodtimetable.onDestroyed(() => {
+  Template.instance().exportController.dispose()
+  Template.instance().request.dispose()
   FlowRouter.setQueryParams({ page: null })
-  Template.instance().datatable.destroy()
-  Template.instance().datatable = undefined
+  Template.instance().tableRenderer?.destroy()
 })
