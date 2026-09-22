@@ -1,10 +1,27 @@
 const { defineConfig } = require('@meteorjs/rspack')
 const path = require('path')
 
+function productionClientChunks(Meteor) {
+  if (!Meteor.isClient || !Meteor.isProduction) return {}
+  // Match Meteor's chunk directory, including isolated/test build contexts.
+  const localDirectory = process.env.METEOR_LOCAL_DIR
+    ? path.basename(process.env.METEOR_LOCAL_DIR.replace(/\\/g, '/')) : ''
+  const chunksContext = Meteor.chunksContext || process.env.RSPACK_CHUNKS_CONTEXT
+    || `build-chunks${localDirectory ? `-${localDirectory}` : ''}`
+  return {
+    // A chunkhash can stay unchanged when Rspack reassigns module IDs between
+    // releases. Browsers then reuse a chunk that registers the old module ID.
+    // Hash the final emitted bytes so these incompatible chunks get new URLs.
+    output: { chunkFilename: `${chunksContext}/[id].[contenthash].js` },
+    optimization: { realContentHash: true },
+  }
+}
+
 /**
  * Rspack configuration for Meteor projects.
  */
 module.exports = defineConfig((Meteor) => ({
+  ...productionClientChunks(Meteor),
   resolve: {
     // make sure rspack resolves the extensions we use and skip .d.ts
     extensions: ['.js', '.jsx', '.mjs', '.ts', '.tsx', '.json', '.css', '.scss', '.sass'],
